@@ -1,0 +1,21 @@
+ticker,benchmark,note
+AAPL,NDX,Apple
+MSFT,NDX,Microsoft
+GOOGL,NDX,Alphabet
+AMZN,NDX,Amazon
+NVDA,NDX,Nvidia
+META,NDX,Meta
+TSLA,NDX,Tesla
+AVGO,NDX,Broadcom
+COST,NDX,Costco
+NFLX,NDX,Netflix
+BRK-B,SPX,Berkshire
+JPM,SPX,JPMorgan
+V,SPX,Visa
+MA,SPX,Mastercard
+UNH,SPX,UnitedHealth
+XOM,SPX,Exxon
+JNJ,SPX,Johnson & Johnson
+WMT,SPX,Walmart
+PG,SPX,Procter & Gamble
+HD,SPX,Home Depot
