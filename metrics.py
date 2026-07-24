@@ -119,6 +119,30 @@ def _nearest_forward(est_rows: list, latest_fy: int | None) -> dict | None:
     return fwd[0] if fwd else None
 
 
+def _ntm_estimate(est_rows: list, latest_fy: int | None, field: str) -> float | None:
+    """Next-twelve-months consensus for `field`: FY1/FY2 estimates blended by
+    the fraction of FY1 still ahead (w*FY1 + (1-w)*FY2). Falls back to FY1
+    alone when no FY2 estimate exists."""
+    fy1 = _nearest_forward(est_rows, latest_fy)
+    if fy1 is None:
+        return None
+    v1 = _num(safe_get(fy1, field))
+    if v1 is None:
+        return None
+    fy2 = _nearest_forward(est_rows, _fiscal_year(fy1))
+    v2 = _num(safe_get(fy2, field)) if fy2 else None
+    try:
+        days_left = (
+            pd.Timestamp(fy1.get("date")).date() - datetime.now(timezone.utc).date()
+        ).days
+    except (ValueError, TypeError):
+        days_left = None
+    if v2 is None or days_left is None:
+        return v1
+    w = min(max(days_left / 365.0, 0.0), 1.0)
+    return w * v1 + (1.0 - w) * v2
+
+
 # ---------------------------------------------------------------------------
 # Per-ticker fetch
 # ---------------------------------------------------------------------------
@@ -322,7 +346,8 @@ def _fetch_one(
     row.set("market_cap", mcap)
 
     # ---- ratios-ttm (units probe-confirmed: true ratios, decimal margins) --
-    row.set("pe_trailing", _num(safe_get(ratios, "priceToEarningsRatioTTM")))
+    pe_ttm = _num(safe_get(ratios, "priceToEarningsRatioTTM"))
+    row.set("pe_trailing", pe_ttm)
     ps = _num(safe_get(ratios, "priceToSalesRatioTTM"))
     if ps is None:
         ps = _div(mcap, rev0)
@@ -357,15 +382,18 @@ def _fetch_one(
         _div(ebit, abs(int_exp)) if int_exp not in (None, 0) else None,
     )
 
-    # ---- forward estimates (nearest forward fiscal year) -------------------
-    actual_eps = _num(safe_get(inc0, "epsDiluted"))
-    if actual_eps is None:
-        actual_eps = _num(safe_get(inc0, "eps"))
-    nxt = _nearest_forward(est, _fiscal_year(inc0))
-    eps_fwd = _num(safe_get(nxt, "epsAvg")) if nxt else None
-    row.set("fwd_rev_growth", _growth(_num(safe_get(nxt, "revenueAvg")) if nxt else None, rev0))
-    row.set("fwd_eps_growth", _growth(eps_fwd, actual_eps))
-    row.set("pe_forward", _div(last_price, eps_fwd))
+    # ---- forward estimates: NTM = time-weighted FY1/FY2 consensus ----------
+    latest_fy = _fiscal_year(inc0)
+    ntm_eps = _ntm_estimate(est, latest_fy, "epsAvg")
+    ntm_rev = _ntm_estimate(est, latest_fy, "revenueAvg")
+    # TTM bases derived from the TTM ratios (price/PE, mcap/PS) so numerator
+    # and denominator are both twelve-month windows.
+    ttm_eps = _div(last_price, pe_ttm)
+    if ttm_eps is not None and ttm_eps <= 0:
+        ttm_eps = None  # growth vs negative earnings is not meaningful
+    row.set("fwd_eps_growth", _growth(ntm_eps, ttm_eps))
+    row.set("fwd_rev_growth", _growth(ntm_rev, _div(mcap, ps)))
+    row.set("pe_forward", _div(last_price, ntm_eps))
 
     # ---- dividend yield: computed trailing div/share ÷ price ---------------
     # (reproduces FMP's dividendYieldTTM to ~5dp; absent field on a live
