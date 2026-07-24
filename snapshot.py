@@ -128,9 +128,10 @@ def main() -> int:
     print(f"Building report for {len(tickers_df)} tickers...")
     report = build_report(tickers_df, delay=args.delay)
     # Fail-loud, non-clobbering: a bad API day (e.g. FMP daily cap exhausted)
-    # must not overwrite the last good snapshot with nulls.
+    # must not overwrite the last good snapshot with nulls. A healthy pull
+    # prices ~100%; 80% tolerates a couple of delisted/renamed tickers.
     n_priced = int(report["last_price"].notna().sum())
-    if len(report) and n_priced < len(report) / 2:
+    if len(report) and n_priced < 0.8 * len(report):
         print(f"ABORT: only {n_priced}/{len(report)} tickers priced — not writing snapshot")
         return 1
     report.to_parquet(args.parquet, index=False)
