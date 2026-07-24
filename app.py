@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import logging
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +26,38 @@ st.set_page_config(
     page_icon=":bar_chart:",
     layout="wide",
 )
+
+
+# ---------------------------------------------------------------------------
+# Session log: metrics.py and this file log to "stocklist"; entries land in a
+# session buffer surfaced by the Logs expander. The handler is swapped every
+# rerun, so with concurrent viewers module-level logs go to the most recent
+# session — fine for a single-user dashboard.
+# ---------------------------------------------------------------------------
+
+class _SessionLogHandler(logging.Handler):
+    def __init__(self, buf: list[str]) -> None:
+        super().__init__(level=logging.INFO)
+        self.buf = buf
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.buf.append(self.format(record))
+
+
+if "_logs" not in st.session_state:
+    st.session_state["_logs"] = []
+LOGS: list[str] = st.session_state["_logs"]
+
+logger = logging.getLogger("stocklist")
+logger.setLevel(logging.INFO)
+for _h in list(logger.handlers):
+    if isinstance(_h, _SessionLogHandler):
+        logger.removeHandler(_h)
+_handler = _SessionLogHandler(LOGS)
+_fmt = logging.Formatter("%(asctime)sZ %(levelname)s %(message)s", "%Y-%m-%dT%H:%M:%S")
+_fmt.converter = time.gmtime
+_handler.setFormatter(_fmt)
+logger.addHandler(_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +102,7 @@ def _load_snapshot() -> pd.DataFrame | None:
     try:
         return pd.read_parquet(path)
     except Exception as e:
+        logger.error("Snapshot load failed: %r", e)
         st.warning(f"Couldn't load cached snapshot: {e}")
         return None
 
@@ -102,6 +137,29 @@ if "report" not in st.session_state:
 if "tickers_df" not in st.session_state:
     st.session_state["tickers_df"] = _load_default_tickers()
 
+with st.form("quick_add", clear_on_submit=True, border=False):
+    c1, c2, c3 = st.columns([2, 1, 5])
+    new_ticker = c1.text_input(
+        "Add ticker", placeholder="e.g. ORCL", label_visibility="collapsed"
+    )
+    add_clicked = c2.form_submit_button("Add ticker", use_container_width=True)
+
+if add_clicked and new_ticker.strip():
+    t = new_ticker.strip().upper()
+    tdf = st.session_state["tickers_df"]
+    if t in tdf["ticker"].astype(str).str.upper().values:
+        st.toast(f"{t} is already in the list.")
+    else:
+        st.session_state["tickers_df"] = pd.concat(
+            [tdf, pd.DataFrame([{"ticker": t, "benchmark": "SPX", "note": ""}])],
+            ignore_index=True,
+        )
+        # Reset the editor widget so it picks up the appended row, then
+        # refetch immediately so the new ticker shows without a second click.
+        st.session_state.pop("ticker_editor", None)
+        st.session_state["_do_refresh"] = True
+        st.rerun()
+
 with st.sidebar:
     st.header("Tickers")
     st.caption("Edit rows, add/delete, then click **Refresh data**.")
@@ -121,9 +179,6 @@ with st.sidebar:
     st.session_state["tickers_df"] = edited
 
     refresh = st.button("Refresh data", type="primary", use_container_width=True)
-    if st.button("Reset to default list", use_container_width=True):
-        st.session_state["tickers_df"] = _load_default_tickers()
-        st.rerun()
 
     if snapshot is not None and "as_of" in snapshot.columns and not snapshot.empty:
         as_of = snapshot["as_of"].dropna().iloc[0] if snapshot["as_of"].notna().any() else "unknown"
@@ -131,7 +186,7 @@ with st.sidebar:
     else:
         st.warning("No cached snapshot — click **Refresh data**.")
 
-if refresh:
+if refresh or st.session_state.pop("_do_refresh", False):
     clean = (
         st.session_state["tickers_df"]
         .dropna(subset=["ticker"])
@@ -147,7 +202,15 @@ if refresh:
     else:
         with st.spinner(f"Fetching {len(clean)} tickers from Yahoo..."):
             tuples = tuple((r.ticker, r.benchmark, r.note) for r in clean.itertuples(index=False))
-            st.session_state["report"] = _cached_build_report(tuples)
+            t0 = time.time()
+            try:
+                st.session_state["report"] = _cached_build_report(tuples)
+            except Exception as e:
+                logger.error("Data pull failed: %r", e)
+                st.error(f"Data pull failed: {e} — details in Logs below.")
+            else:
+                st.session_state["last_pull_utc"] = datetime.now(timezone.utc)
+                logger.info("Pulled %d tickers in %.1fs", len(clean), time.time() - t0)
 
 report: pd.DataFrame | None = st.session_state.get("report")
 
@@ -163,8 +226,36 @@ report = report[COLUMNS]
 
 # ---- Styled, sortable table ----------------------------------------------
 
+VIEW_GROUPS: dict[str, list[str] | None] = {
+    "All": None,
+    "Valuation": [
+        "market_cap", "pe_trailing", "pe_forward", "ps", "pb", "peg",
+        "ev_ebitda", "ev_sales", "fcf_yield", "dividend_yield",
+    ],
+    "Growth": ["rev_growth_ttm", "fwd_eps_growth", "fwd_rev_growth", "next_earnings"],
+    "Profitability": ["roa", "roe", "gross_margin", "operating_margin", "free_cash_flow"],
+    "Balance sheet": [
+        "current_ratio", "quick_ratio", "debt_equity", "debt_assets",
+        "net_debt_ebitda", "interest_coverage",
+    ],
+    "Price": [
+        "last_price", "ytd_pct", "pct_from_52w_high", "fifty_two_week_high",
+        "fifty_two_week_low", "vol_2m_annualized", "beta", "avg_dollar_vol_30d",
+    ],
+}
+last_pull = st.session_state.get("last_pull_utc")
+if last_pull is not None:
+    st.caption(f"Last data pull: {last_pull:%Y-%m-%d %H:%M:%S} UTC (live this session)")
+elif report["as_of"].notna().any():
+    st.caption(f"Last data pull: {report['as_of'].dropna().iloc[0]} (cached snapshot)")
+
+view = st.radio("View", list(VIEW_GROUPS), horizontal=True, label_visibility="collapsed")
+
 display = report.copy()
 display = display.drop(columns=["sector", "industry"], errors="ignore")
+group = VIEW_GROUPS[view]
+if group is not None:
+    display = display[["ticker"] + [c for c in group if c in display.columns]]
 labels = {c: EXCEL_FORMATS.get(c, (c, "@"))[0] for c in display.columns}
 display = display.rename(columns=labels)
 
@@ -202,6 +293,7 @@ percent_cols = [
         "fwd_eps_growth", "fwd_rev_growth", "roa", "roe",
         "gross_margin", "operating_margin", "dividend_yield", "vol_2m_annualized",
     )
+    if c in labels
 ]
 ratio_cols = [
     labels[c]
@@ -211,11 +303,18 @@ ratio_cols = [
         "debt_equity", "debt_assets", "net_debt_ebitda", "interest_coverage",
         "beta",
     )
+    if c in labels
 ]
-money_cols = [labels[c] for c in ("last_price", "fifty_two_week_high", "fifty_two_week_low")]
-int_cols = [labels[c] for c in ("free_cash_flow", "avg_dollar_vol_30d")]
+money_cols = [
+    labels[c]
+    for c in ("last_price", "fifty_two_week_high", "fifty_two_week_low")
+    if c in labels
+]
+int_cols = [labels[c] for c in ("free_cash_flow", "avg_dollar_vol_30d") if c in labels]
 
-fmt: dict[str, object] = {labels["market_cap"]: _abbrev_dollars}
+fmt: dict[str, object] = {}
+if "market_cap" in labels:
+    fmt[labels["market_cap"]] = _abbrev_dollars
 for c in percent_cols:
     fmt[c] = "{:+.2%}"
 for c in ratio_cols:
@@ -225,13 +324,17 @@ for c in money_cols:
 for c in int_cols:
     fmt[c] = "{:,.0f}"
 
-styled = (
-    display.style
-    .format(fmt, na_rep="—")
-    .map(_color_signed, subset=[labels["ytd_pct"], labels["pct_from_52w_high"]])
-)
+styled = display.style.format(fmt, na_rep="—")
+signed_cols = [labels[c] for c in ("ytd_pct", "pct_from_52w_high") if c in labels]
+if signed_cols:
+    styled = styled.map(_color_signed, subset=signed_cols)
 
-st.dataframe(styled, use_container_width=True, hide_index=True)
+st.dataframe(
+    styled,
+    use_container_width=True,
+    hide_index=True,
+    column_config={labels["ticker"]: st.column_config.Column(pinned=True)},
+)
 
 # ---- Excel download -------------------------------------------------------
 
@@ -260,4 +363,19 @@ with st.expander("Diagnostics: missing fields per ticker"):
             "Yahoo's free feed has gaps — common nulls: `next_earnings`, forward "
             "growth, bank tickers (no FCF/EBITDA-based metrics), and certain "
             "non-US tickers."
+        )
+
+# ---- Logs -----------------------------------------------------------------
+
+with st.expander(f"Logs ({len(LOGS)} entries)"):
+    if LOGS:
+        st.code("\n".join(LOGS), language=None)
+        st.caption("Copy icon (top-right of the block) copies everything.")
+        if st.button("Clear logs"):
+            st.session_state["_logs"] = []
+            st.rerun()
+    else:
+        st.caption(
+            "Nothing logged this session. Fetch retries, data-loading failures, "
+            "and pull results will appear here."
         )

@@ -7,6 +7,7 @@ from a notebook, CLI script, or GitHub Action.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +19,11 @@ import yfinance as yf
 
 
 BENCHMARK_SYMBOLS = {"SPX": "^GSPC", "NDX": "^NDX"}
+
+logger = logging.getLogger("stocklist")
+# Symbol currently being fetched, so _retry failures can name it. Fetches are
+# sequential, so a plain module dict is enough.
+_log_ctx: dict[str, str] = {}
 
 # Output column order. Kept here so app.py + Excel writer share one source of truth.
 COLUMNS: list[str] = [
@@ -56,8 +62,11 @@ def _retry(fn: Callable[[], Any], *, attempts: int = 3, base_delay: float = 0.6)
         except Exception as e:  # network / parsing / Yahoo flakiness
             last_err = e
             time.sleep(base_delay * (2 ** i))
-    # Swallow — caller treats None as missing data.
-    _ = last_err
+    # Caller treats None as missing data; the log line is the only trace.
+    logger.warning(
+        "[%s] fetch failed after %d attempts: %r",
+        _log_ctx.get("ticker", "?"), attempts, last_err,
+    )
     return None
 
 
@@ -215,6 +224,7 @@ def _fetch_one(
     bench_cache: dict[str, pd.DataFrame],
     delay: float,
 ) -> _Row:
+    _log_ctx["ticker"] = ticker
     row = _Row(ticker=ticker, benchmark=benchmark, note=note or "")
 
     tk = yf.Ticker(ticker)
@@ -390,8 +400,12 @@ def build_report(tickers_df: pd.DataFrame, *, delay: float = 0.25) -> pd.DataFra
     # Pre-fetch each needed benchmark's 2y history once.
     needed_benches = {BENCHMARK_SYMBOLS.get(b, BENCHMARK_SYMBOLS["SPX"]) for b in df["benchmark"]}
     bench_cache: dict[str, pd.DataFrame] = {}
+    logger.info("Fetching %d tickers from Yahoo", len(df))
     for sym in needed_benches:
+        _log_ctx["ticker"] = sym
         h = _retry(lambda s=sym: yf.Ticker(s).history(period="2y", interval="1d", auto_adjust=False))
+        if not isinstance(h, pd.DataFrame) or h.empty:
+            logger.error("[%s] benchmark history unavailable — beta will be null", sym)
         bench_cache[sym] = h if isinstance(h, pd.DataFrame) else pd.DataFrame()
 
     as_of = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -400,6 +414,7 @@ def build_report(tickers_df: pd.DataFrame, *, delay: float = 0.25) -> pd.DataFra
         try:
             row = _fetch_one(r["ticker"], r["benchmark"], str(r.get("note", "")), bench_cache, delay)
         except Exception as e:
+            logger.error("[%s] fatal during fetch: %r", r["ticker"], e)
             row = _Row(ticker=r["ticker"], benchmark=r["benchmark"], note=str(r.get("note", "")))
             row.missing.append(f"fatal:{type(e).__name__}")
         rec: dict[str, Any] = {
