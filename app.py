@@ -239,7 +239,10 @@ with st.expander("Diagnostics: missing fields per ticker"):
     if diag.empty:
         st.success("All fields populated for every ticker.")
     else:
-        st.dataframe(diag, use_container_width=True, hide_index=True)
+        diag_text = "\n".join(
+            f"{r.ticker}: {r.missing_fields}" for r in diag.itertuples(index=False)
+        )
+        st.code(diag_text, language=None)
         st.caption(
             "Yahoo's free feed has gaps — common nulls: `debt_assets` (totalAssets not "
             "in .info), `next_earnings`, forward growth, and certain non-US tickers."
