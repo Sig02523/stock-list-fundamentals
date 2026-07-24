@@ -170,7 +170,17 @@ if add_clicked and new_ticker.strip():
             except Exception as e:
                 logger.error("[%s] add-ticker pull failed: %r", t, e)
                 st.error(f"Couldn't add {t}: {e}")
-        if one is not None and not one.empty and one["last_price"].notna().any():
+        # Accept the row if ANYTHING came back (Yahoo price metrics still fill
+        # when the FMP budget is exhausted); fundamentals backfill on the next
+        # successful full refresh. Only a totally-empty row = bad symbol.
+        has_any = False
+        if one is not None and not one.empty:
+            data_only = one.drop(
+                columns=["ticker", "benchmark", "note", "missing_fields", "as_of"],
+                errors="ignore",
+            )
+            has_any = bool(data_only.notna().any().any())
+        if has_any:
             st.session_state["tickers_df"] = pd.concat(
                 [tdf, pd.DataFrame([{"ticker": t, "benchmark": "SPX", "note": ""}])],
                 ignore_index=True,
@@ -183,11 +193,8 @@ if add_clicked and new_ticker.strip():
             st.session_state.pop("ticker_editor", None)
             st.rerun()
         elif one is not None:
-            logger.error("[%s] add-ticker fetch returned no data", t)
-            st.error(
-                f"No data for {t} — bad symbol, missing FMP_API_KEY secret, "
-                "or the FMP daily call budget is exhausted (see Logs below)."
-            )
+            logger.error("[%s] add-ticker fetch returned no data at all", t)
+            st.error(f"No data at all for {t} — probably a bad symbol (see Logs).")
 
 with st.expander("Edit ticker list"):
     st.caption("Edit rows, add/delete, then click **Refresh data**.")

@@ -304,21 +304,21 @@ def _fetch_one(
         return default
 
     quote = _ep("quote", lambda: fmp.quote(ticker), {})
-    profile = _ep("profile", lambda: fmp.profile(ticker), {})
-    is_fund = bool(safe_get(profile, "isEtf")) or bool(safe_get(profile, "isFund"))
-    if is_fund:
-        # ETFs/funds have no fundamentals — don't spend the API calls.
-        ratios: dict = {}
-        km: dict = {}
-        inc: list = []
-        cash0: dict = {}
-        est: list = []
-    else:
-        ratios = _ep("ratios-ttm", lambda: fmp.ratios_ttm(ticker), {})
+    ratios = _ep("ratios-ttm", lambda: fmp.ratios_ttm(ticker), {})
+    # Empty ratios = ETF/fund (no fundamentals) — or a dead API day. Either
+    # way, skip the remaining endpoints instead of spending 4 more calls.
+    # (The profile endpoint was dropped to fit the free-tier daily budget;
+    # sector/industry are no longer populated.)
+    if ratios:
         km = _ep("key-metrics-ttm", lambda: fmp.key_metrics_ttm(ticker), {})
         inc = _ep("income-statement", lambda: fmp.income_statement(ticker, limit=2), [])
         cash0 = first(_ep("cash-flow", lambda: fmp.cash_flow(ticker, limit=1), []))
         est = _ep("analyst-estimates", lambda: fmp.analyst_estimates(ticker, limit=10), [])
+    else:
+        km = {}
+        inc = []
+        cash0 = {}
+        est = []
     inc0 = inc[0] if inc else {}
     inc1 = inc[1] if len(inc) > 1 else {}
 
@@ -338,8 +338,8 @@ def _fetch_one(
     mcap = _num(safe_get(quote, "marketCap"))
     rev0 = _num(safe_get(inc0, "revenue"))
 
-    row.set("sector", safe_get(profile, "sector"))
-    row.set("industry", safe_get(profile, "industry"))
+    row.set("sector", None)
+    row.set("industry", None)
     row.set("last_price", last_price)
     row.set("fifty_two_week_high", high_52w)
     row.set("fifty_two_week_low", _num(safe_get(quote, "yearLow")))
@@ -408,11 +408,12 @@ def _fetch_one(
     for k, v in pm.items():
         row.set(k, v)
 
-    # ETFs/funds have no earnings; skip the lookup rather than retry a 404.
-    if is_fund:
-        row.set("next_earnings", None)
-    else:
+    # No ratios = ETF/fund (or dead API day); skip the earnings lookup rather
+    # than retry a 404.
+    if ratios:
         row.set("next_earnings", _next_earnings_date(tk))
+    else:
+        row.set("next_earnings", None)
 
     if delay > 0:
         time.sleep(delay)
