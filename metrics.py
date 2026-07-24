@@ -113,30 +113,43 @@ class _Row:
 
 
 def _next_earnings_date(tk: yf.Ticker) -> str | None:
-    """Best-effort next earnings date as ISO YYYY-MM-DD."""
-    # Newer yfinance versions: .get_earnings_dates() returns a DataFrame indexed by datetime.
-    df = _retry(lambda: tk.get_earnings_dates(limit=8))
-    if isinstance(df, pd.DataFrame) and not df.empty:
-        try:
-            idx = pd.to_datetime(df.index, errors="coerce", utc=True)
-            now = pd.Timestamp.now(tz="UTC")
-            future = idx[idx >= now]
-            if len(future) > 0:
-                return future.min().strftime("%Y-%m-%d")
-        except Exception:
-            pass
-    # Older fallback: .calendar
+    """Next earnings date as 'YYYY-MM-DD (C)' confirmed or '(E)' estimated.
+
+    Primary source is the raw quoteSummary calendarEvents module — the only
+    place Yahoo exposes ``isEarningsDateEstimate`` — fetched through
+    yfinance's own session so its cookie/crumb handling is reused.
+    """
+    def _raw_calendar() -> dict:
+        from yfinance.data import YfData
+        j = YfData().get_raw_json(
+            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{tk.ticker}",
+            params={"modules": "calendarEvents"},
+        )
+        return j["quoteSummary"]["result"][0]["calendarEvents"]["earnings"]
+
+    earnings = _retry(_raw_calendar)
+    if isinstance(earnings, dict):
+        epochs = [d.get("raw") for d in earnings.get("earningsDate", []) if d.get("raw")]
+        if epochs:
+            first = pd.Timestamp(min(epochs), unit="s", tz="UTC")
+            flag = "E" if earnings.get("isEarningsDateEstimate", True) else "C"
+            return f"{first:%Y-%m-%d} ({flag})"
+
+    # Fallback: the parsed .calendar dict. It drops the estimate flag; Yahoo
+    # shows a date *range* until the company confirms, so 2+ dates means (E).
     cal = _retry(lambda: tk.calendar)
     if isinstance(cal, dict):
-        d = cal.get("Earnings Date")
-        if isinstance(d, list) and d:
-            d = d[0]
-        if isinstance(d, (datetime, pd.Timestamp)):
-            return pd.Timestamp(d).strftime("%Y-%m-%d")
+        dates = cal.get("Earnings Date")
+        if isinstance(dates, list) and dates:
+            flag = "E" if len(dates) > 1 else "C"
+            try:
+                return f"{pd.Timestamp(dates[0]):%Y-%m-%d} ({flag})"
+            except Exception:
+                return None
     elif isinstance(cal, pd.DataFrame) and not cal.empty:
         try:
             v = cal.loc["Earnings Date"].iloc[0]
-            return pd.Timestamp(v).strftime("%Y-%m-%d")
+            return f"{pd.Timestamp(v):%Y-%m-%d} (E)"
         except Exception:
             pass
     return None
@@ -362,7 +375,11 @@ def _fetch_one(
         peg = pe_n / (fwd_eps_n * 100.0)
     row.set("peg", peg)
 
-    row.set("next_earnings", _next_earnings_date(tk))
+    # ETFs/funds have no earnings; skip the lookup rather than retry a 404.
+    if info.get("quoteType", "EQUITY") == "EQUITY":
+        row.set("next_earnings", _next_earnings_date(tk))
+    else:
+        row.set("next_earnings", None)
 
     if delay > 0:
         time.sleep(delay)
