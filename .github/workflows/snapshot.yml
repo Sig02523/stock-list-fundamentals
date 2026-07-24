@@ -34,6 +34,8 @@ jobs:
 
       - name: Build snapshot
         run: python snapshot.py
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
 
       - name: Commit snapshot if changed
         run: |

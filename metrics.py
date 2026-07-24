@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from fmp_client import FMPAccessError, FMPClient, FMPError, first, safe_get
+
 
 BENCHMARK_SYMBOLS = {"SPX": "^GSPC", "NDX": "^NDX"}
 
@@ -89,6 +91,32 @@ def _div(a: float | None, b: float | None) -> float | None:
     if a is None or b is None or b == 0:
         return None
     return a / b
+
+
+def _growth(new: float | None, old: float | None) -> float | None:
+    """(new/old - 1) with None on missing/zero denominator."""
+    r = _div(new, old)
+    return None if r is None else r - 1
+
+
+def _fiscal_year(row: dict) -> int | None:
+    fy = row.get("fiscalYear") or row.get("calendarYear")
+    if fy is None:
+        d = row.get("date")
+        fy = str(d)[:4] if d else None
+    try:
+        return int(fy)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nearest_forward(est_rows: list, latest_fy: int | None) -> dict | None:
+    """Nearest forward-year analyst-estimate row (fiscalYear > latest actual)."""
+    if not est_rows or latest_fy is None:
+        return None
+    fwd = [r for r in est_rows if (_fiscal_year(r) or -1) > latest_fy]
+    fwd.sort(key=lambda r: _fiscal_year(r) or 0)
+    return fwd[0] if fwd else None
 
 
 # ---------------------------------------------------------------------------
@@ -236,16 +264,43 @@ def _fetch_one(
     note: str,
     bench_cache: dict[str, pd.DataFrame],
     delay: float,
+    fmp: FMPClient,
 ) -> _Row:
     _log_ctx["ticker"] = ticker
     row = _Row(ticker=ticker, benchmark=benchmark, note=note or "")
 
-    tk = yf.Ticker(ticker)
-    info = _retry(lambda: tk.get_info()) or _retry(lambda: tk.info) or {}
-    if not isinstance(info, dict):
-        info = {}
+    def _ep(name: str, fn: Callable[[], Any], default: Any) -> Any:
+        """One FMP endpoint call; failures degrade to `default` + a log line."""
+        try:
+            return fn()
+        except FMPAccessError as e:
+            logger.warning("[%s] FMP %s gated on this plan: %r", ticker, name, e)
+        except Exception as e:  # FMPError / network after tenacity gave up
+            logger.warning("[%s] FMP %s failed: %r", ticker, name, e)
+        return default
 
-    # ~2y of daily prices powers YTD, vol, beta. Single network call per ticker.
+    quote = _ep("quote", lambda: fmp.quote(ticker), {})
+    profile = _ep("profile", lambda: fmp.profile(ticker), {})
+    is_fund = bool(safe_get(profile, "isEtf")) or bool(safe_get(profile, "isFund"))
+    if is_fund:
+        # ETFs/funds have no fundamentals — don't spend the API calls.
+        ratios: dict = {}
+        km: dict = {}
+        inc: list = []
+        cash0: dict = {}
+        est: list = []
+    else:
+        ratios = _ep("ratios-ttm", lambda: fmp.ratios_ttm(ticker), {})
+        km = _ep("key-metrics-ttm", lambda: fmp.key_metrics_ttm(ticker), {})
+        inc = _ep("income-statement", lambda: fmp.income_statement(ticker, limit=2), [])
+        cash0 = first(_ep("cash-flow", lambda: fmp.cash_flow(ticker, limit=1), []))
+        est = _ep("analyst-estimates", lambda: fmp.analyst_estimates(ticker, limit=10), [])
+    inc0 = inc[0] if inc else {}
+    inc1 = inc[1] if len(inc) > 1 else {}
+
+    tk = yf.Ticker(ticker)
+    # ~2y of daily prices powers YTD, vol, beta — still Yahoo (free, uncapped;
+    # FMP gates ^NDX history on the free tier).
     hist = _retry(lambda: tk.history(period="2y", interval="1d", auto_adjust=False))
     if not isinstance(hist, pd.DataFrame):
         hist = pd.DataFrame()
@@ -253,133 +308,83 @@ def _fetch_one(
     bench_symbol = BENCHMARK_SYMBOLS.get(benchmark.upper(), BENCHMARK_SYMBOLS["SPX"])
     bench_hist = bench_cache.get(bench_symbol)
 
-    # ---- direct .info lookups ---------------------------------------------
-    last_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-    high_52w = info.get("fiftyTwoWeekHigh")
-    low_52w = info.get("fiftyTwoWeekLow")
-    market_cap = info.get("marketCap")
-    pe_trailing = info.get("trailingPE")
-    pe_forward = info.get("forwardPE")
-    ps = info.get("priceToSalesTrailing12Months")
-    pb = info.get("priceToBook")
-    rev_growth_ttm = info.get("revenueGrowth")
-    roa = info.get("returnOnAssets")
-    roe = info.get("returnOnEquity")
-    fcf = info.get("freeCashflow")
-    current_ratio = info.get("currentRatio")
-    quick_ratio = info.get("quickRatio")
-    debt_equity = info.get("debtToEquity")
-    gross_margin = info.get("grossMargins")
-    operating_margin = info.get("operatingMargins")
-    sector = info.get("sector")
-    industry = info.get("industry")
-    div_yield = info.get("dividendYield")
-    # Forward growth: Yahoo's "earningsGrowth" is YoY recent quarter (best-effort proxy).
-    fwd_eps_growth = info.get("earningsGrowth") or info.get("earningsQuarterlyGrowth")
-    fwd_rev_growth = info.get("revenueGrowth")  # Yahoo doesn't expose forward separately
+    # ---- quote + profile --------------------------------------------------
+    last_price = _num(safe_get(quote, "price"))
+    high_52w = _num(safe_get(quote, "yearHigh"))
+    mcap = _num(safe_get(quote, "marketCap"))
+    rev0 = _num(safe_get(inc0, "revenue"))
 
-    # yfinance >=0.2.40 returns dividendYield in percent points (0.35 == 0.35%);
-    # normalize to a fraction so the UI can format it like every other ratio.
-    div_yield_n = _num(div_yield)
-    if div_yield_n is not None:
-        div_yield_n = div_yield_n / 100.0
-    elif _num(market_cap) is not None:
-        # Yahoo omits dividendYield entirely for non-payers; only treat it as
-        # missing when the whole .info fetch came back empty.
-        div_yield_n = 0.0
+    row.set("sector", safe_get(profile, "sector"))
+    row.set("industry", safe_get(profile, "industry"))
+    row.set("last_price", last_price)
+    row.set("fifty_two_week_high", high_52w)
+    row.set("fifty_two_week_low", _num(safe_get(quote, "yearLow")))
+    row.set("market_cap", mcap)
 
-    # debtToEquity from Yahoo is in percent (e.g. 150.0 means 1.50). Normalize.
-    de_n = _num(debt_equity)
-    if de_n is not None and abs(de_n) > 5:
-        de_n = de_n / 100.0
+    # ---- ratios-ttm (units probe-confirmed: true ratios, decimal margins) --
+    row.set("pe_trailing", _num(safe_get(ratios, "priceToEarningsRatioTTM")))
+    ps = _num(safe_get(ratios, "priceToSalesRatioTTM"))
+    if ps is None:
+        ps = _div(mcap, rev0)
+    row.set("ps", ps)
+    row.set("pb", _num(safe_get(ratios, "priceToBookRatioTTM")))
+    row.set("current_ratio", _num(safe_get(ratios, "currentRatioTTM")))
+    row.set("quick_ratio", _num(safe_get(ratios, "quickRatioTTM")))
+    row.set("debt_equity", _num(safe_get(ratios, "debtToEquityRatioTTM")))
+    row.set("debt_assets", _num(safe_get(ratios, "debtToAssetsRatioTTM")))
+    row.set("gross_margin", _num(safe_get(ratios, "grossProfitMarginTTM")))
+    row.set("operating_margin", _num(safe_get(ratios, "operatingProfitMarginTTM")))
+    row.set("peg", _num(safe_get(ratios, "priceToEarningsGrowthRatioTTM")))
 
-    row.set("sector", sector)
-    row.set("industry", industry)
-    row.set("last_price", _num(last_price))
-    row.set("fifty_two_week_high", _num(high_52w))
-    row.set("fifty_two_week_low", _num(low_52w))
-    row.set("market_cap", _num(market_cap))
-    row.set("pe_trailing", _num(pe_trailing))
-    row.set("pe_forward", _num(pe_forward))
-    row.set("ps", _num(ps))
-    row.set("pb", _num(pb))
-    row.set("rev_growth_ttm", _num(rev_growth_ttm))
-    row.set("fwd_eps_growth", _num(fwd_eps_growth))
-    row.set("fwd_rev_growth", _num(fwd_rev_growth))
-    row.set("roa", _num(roa))
-    row.set("roe", _num(roe))
-    row.set("free_cash_flow", _num(fcf))
-    row.set("current_ratio", _num(current_ratio))
-    row.set("quick_ratio", _num(quick_ratio))
-    row.set("debt_equity", de_n)
-    row.set("gross_margin", _num(gross_margin))
-    row.set("operating_margin", _num(operating_margin))
-    row.set("dividend_yield", div_yield_n)
+    # ---- key-metrics-ttm (ROA/ROE + EV multiples live here, not ratios) ----
+    row.set("roa", _num(safe_get(km, "returnOnAssetsTTM")))
+    row.set("roe", _num(safe_get(km, "returnOnEquityTTM")))
+    row.set("ev_ebitda", _num(safe_get(km, "evToEBITDATTM")))
+    row.set("ev_sales", _num(safe_get(km, "evToSalesTTM")))
+    row.set("fcf_yield", _num(safe_get(km, "freeCashFlowYieldTTM")))
+    row.set("net_debt_ebitda", _num(safe_get(km, "netDebtToEBITDATTM")))
 
-    # ---- price-derived ----------------------------------------------------
-    pm = _price_metrics(hist, bench_hist, _num(last_price), _num(high_52w))
+    # ---- statements --------------------------------------------------------
+    row.set("free_cash_flow", _num(safe_get(cash0, "freeCashFlow")))
+    row.set("rev_growth_ttm", _growth(rev0, _num(safe_get(inc1, "revenue"))))
+    ebit = _num(safe_get(inc0, "ebit"))
+    if ebit is None:
+        ebit = _num(safe_get(inc0, "operatingIncome"))
+    int_exp = _num(safe_get(inc0, "interestExpense"))
+    # interestExpense is reported positive; 0 interest = coverage undefined.
+    row.set(
+        "interest_coverage",
+        _div(ebit, abs(int_exp)) if int_exp not in (None, 0) else None,
+    )
+
+    # ---- forward estimates (nearest forward fiscal year) -------------------
+    actual_eps = _num(safe_get(inc0, "epsDiluted"))
+    if actual_eps is None:
+        actual_eps = _num(safe_get(inc0, "eps"))
+    nxt = _nearest_forward(est, _fiscal_year(inc0))
+    eps_fwd = _num(safe_get(nxt, "epsAvg")) if nxt else None
+    row.set("fwd_rev_growth", _growth(_num(safe_get(nxt, "revenueAvg")) if nxt else None, rev0))
+    row.set("fwd_eps_growth", _growth(eps_fwd, actual_eps))
+    row.set("pe_forward", _div(last_price, eps_fwd))
+
+    # ---- dividend yield: computed trailing div/share ÷ price ---------------
+    # (reproduces FMP's dividendYieldTTM to ~5dp; absent field on a live
+    # ratios payload = genuine non-payer, so 0.0 is real, not missing)
+    dps = _num(safe_get(ratios, "dividendPerShareTTM"))
+    if dps is None and ratios:
+        dps = 0.0
+    row.set("dividend_yield", _div(dps, last_price))
+
+    # ---- price-derived (yfinance history) ----------------------------------
+    pm = _price_metrics(hist, bench_hist, last_price, high_52w)
     for k, v in pm.items():
         row.set(k, v)
 
-    # ---- derived ratios ---------------------------------------------------
-    ev = _num(info.get("enterpriseValue"))
-    ebitda = _num(info.get("ebitda"))
-    total_revenue = _num(info.get("totalRevenue"))
-    total_debt = _num(info.get("totalDebt"))
-    total_assets = _num(info.get("totalAssets"))
-    if total_assets is None:
-        # .info only carries totalAssets for funds/ETFs; equities need the
-        # balance sheet.
-        bs = _retry(lambda: tk.balance_sheet)
-        if isinstance(bs, pd.DataFrame) and not bs.empty:
-            latest_bs = bs.iloc[:, 0]
-            for key in ("Total Assets", "TotalAssets"):
-                if key in bs.index:
-                    total_assets = _num(latest_bs.get(key))
-                    if total_assets is not None:
-                        break
-    total_cash = _num(info.get("totalCash"))
-    mcap = _num(market_cap)
-    # EBIT and interest expense aren't on .info reliably; pull from financials best-effort.
-    ebit = None
-    interest_exp = None
-    fin = _retry(lambda: tk.financials)
-    if isinstance(fin, pd.DataFrame) and not fin.empty:
-        latest = fin.iloc[:, 0]
-        for key in ("EBIT", "Ebit", "Operating Income", "OperatingIncome"):
-            if key in fin.index:
-                ebit = _num(latest.get(key))
-                if ebit is not None:
-                    break
-        for key in ("Interest Expense", "InterestExpense"):
-            if key in fin.index:
-                v = _num(latest.get(key))
-                if v is not None:
-                    interest_exp = abs(v)  # often reported as negative
-                    break
-
-    row.set("ev_ebitda", _div(ev, ebitda))
-    row.set("ev_sales", _div(ev, total_revenue))
-    row.set("fcf_yield", _div(_num(fcf), mcap))
-    row.set("debt_assets", _div(total_debt, total_assets))
-    net_debt = None
-    if total_debt is not None and total_cash is not None:
-        net_debt = total_debt - total_cash
-    row.set("net_debt_ebitda", _div(net_debt, ebitda))
-    row.set("interest_coverage", _div(ebit, interest_exp))
-    # PEG = trailing P/E / (forward EPS growth as percent points). Defensive.
-    peg = None
-    fwd_eps_n = _num(fwd_eps_growth)
-    pe_n = _num(pe_trailing)
-    if pe_n is not None and fwd_eps_n is not None and fwd_eps_n != 0:
-        peg = pe_n / (fwd_eps_n * 100.0)
-    row.set("peg", peg)
-
     # ETFs/funds have no earnings; skip the lookup rather than retry a 404.
-    if info.get("quoteType", "EQUITY") == "EQUITY":
-        row.set("next_earnings", _next_earnings_date(tk))
-    else:
+    if is_fund:
         row.set("next_earnings", None)
+    else:
+        row.set("next_earnings", _next_earnings_date(tk))
 
     if delay > 0:
         time.sleep(delay)
@@ -402,6 +407,8 @@ def build_report(tickers_df: pd.DataFrame, *, delay: float = 0.25) -> pd.DataFra
     if tickers_df is None or tickers_df.empty:
         return pd.DataFrame(columns=COLUMNS)
 
+    fmp = FMPClient()  # raises FMPError if FMP_API_KEY is not set
+
     df = tickers_df.copy()
     df.columns = [c.strip().lower() for c in df.columns]
     if "ticker" not in df.columns:
@@ -417,7 +424,7 @@ def build_report(tickers_df: pd.DataFrame, *, delay: float = 0.25) -> pd.DataFra
     # Pre-fetch each needed benchmark's 2y history once.
     needed_benches = {BENCHMARK_SYMBOLS.get(b, BENCHMARK_SYMBOLS["SPX"]) for b in df["benchmark"]}
     bench_cache: dict[str, pd.DataFrame] = {}
-    logger.info("Fetching %d tickers from Yahoo", len(df))
+    logger.info("Fetching %d tickers (FMP fundamentals + Yahoo prices)", len(df))
     for sym in needed_benches:
         _log_ctx["ticker"] = sym
         h = _retry(lambda s=sym: yf.Ticker(s).history(period="2y", interval="1d", auto_adjust=False))
@@ -429,7 +436,7 @@ def build_report(tickers_df: pd.DataFrame, *, delay: float = 0.25) -> pd.DataFra
     rows: list[dict[str, Any]] = []
     for _, r in df.iterrows():
         try:
-            row = _fetch_one(r["ticker"], r["benchmark"], str(r.get("note", "")), bench_cache, delay)
+            row = _fetch_one(r["ticker"], r["benchmark"], str(r.get("note", "")), bench_cache, delay, fmp)
         except Exception as e:
             logger.error("[%s] fatal during fetch: %r", r["ticker"], e)
             row = _Row(ticker=r["ticker"], benchmark=r["benchmark"], note=str(r.get("note", "")))
@@ -444,6 +451,7 @@ def build_report(tickers_df: pd.DataFrame, *, delay: float = 0.25) -> pd.DataFra
         rec.update(row.data)
         rows.append(rec)
 
+    logger.info("FMP calls used this pull: %d (free tier caps at 250/day)", fmp.call_count)
     out = pd.DataFrame(rows)
     # Ensure full schema present + stable column order.
     for c in COLUMNS:

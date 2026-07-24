@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+# Streamlit Cloud provides the FMP key via st.secrets; the FMP client reads it
+# from the environment (locally .env via python-dotenv). Bridge the two.
+try:
+    if "FMP_API_KEY" in st.secrets:
+        os.environ.setdefault("FMP_API_KEY", st.secrets["FMP_API_KEY"])
+except Exception:
+    pass
 
 from metrics import COLUMNS, build_report
 from snapshot import (

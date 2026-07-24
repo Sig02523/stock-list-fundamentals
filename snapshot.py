@@ -127,6 +127,12 @@ def main() -> int:
     tickers_df = load_tickers(args.tickers)
     print(f"Building report for {len(tickers_df)} tickers...")
     report = build_report(tickers_df, delay=args.delay)
+    # Fail-loud, non-clobbering: a bad API day (e.g. FMP daily cap exhausted)
+    # must not overwrite the last good snapshot with nulls.
+    n_priced = int(report["last_price"].notna().sum())
+    if len(report) and n_priced < len(report) / 2:
+        print(f"ABORT: only {n_priced}/{len(report)} tickers priced — not writing snapshot")
+        return 1
     report.to_parquet(args.parquet, index=False)
     write_excel(report, args.xlsx)
     print(f"Wrote {args.parquet} and {args.xlsx} ({len(report)} rows)")

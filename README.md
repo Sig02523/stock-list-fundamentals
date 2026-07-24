@@ -1,8 +1,13 @@
 # Stock List Fundamentals
 
 A shareable, interactive Streamlit app that shows a daily fundamentals /
-valuation table for a configurable list of tickers, using free Yahoo Finance
-data via [`yfinance`](https://github.com/ranaroussi/yfinance).
+valuation table for a configurable list of tickers. Fundamentals come from
+[Financial Modeling Prep](https://financialmodelingprep.com) (`FMP_API_KEY`
+required — .env locally, Actions secret in CI, `st.secrets` on Streamlit
+Cloud); price history and next-earnings dates come from free Yahoo data via
+[`yfinance`](https://github.com/ranaroussi/yfinance). ~7 FMP calls per equity
+per pull — the free FMP tier (250/day) covers one full refresh of ~35 tickers
+per day; upgrade to Starter for more.
 
 - **`metrics.py`** — pure data layer. `build_report(tickers_df)` returns one
   row per ticker with ~40 metrics. No Streamlit imports — safe to call from a
