@@ -159,15 +159,35 @@ if add_clicked and new_ticker.strip():
     if t in tdf["ticker"].astype(str).str.upper().values:
         st.toast(f"{t} is already in the list.")
     else:
-        st.session_state["tickers_df"] = pd.concat(
-            [tdf, pd.DataFrame([{"ticker": t, "benchmark": "SPX", "note": ""}])],
-            ignore_index=True,
-        )
-        # Reset the editor widget so it picks up the appended row, then
-        # refetch immediately so the new ticker shows without a second click.
-        st.session_state.pop("ticker_editor", None)
-        st.session_state["_do_refresh"] = True
-        st.rerun()
+        # Fetch ONLY the new ticker (~7 FMP calls) and append to the cached
+        # table — a full-list re-pull would burn the free tier's daily budget.
+        one = None
+        with st.spinner(f"Fetching {t}..."):
+            try:
+                one = build_report(
+                    pd.DataFrame([{"ticker": t, "benchmark": "SPX", "note": ""}])
+                )
+            except Exception as e:
+                logger.error("[%s] add-ticker pull failed: %r", t, e)
+                st.error(f"Couldn't add {t}: {e}")
+        if one is not None and not one.empty and one["last_price"].notna().any():
+            st.session_state["tickers_df"] = pd.concat(
+                [tdf, pd.DataFrame([{"ticker": t, "benchmark": "SPX", "note": ""}])],
+                ignore_index=True,
+            )
+            rep = st.session_state.get("report")
+            st.session_state["report"] = (
+                pd.concat([rep, one], ignore_index=True) if rep is not None else one
+            )
+            # Reset the editor widget so it picks up the appended row.
+            st.session_state.pop("ticker_editor", None)
+            st.rerun()
+        elif one is not None:
+            logger.error("[%s] add-ticker fetch returned no data", t)
+            st.error(
+                f"No data for {t} — bad symbol, missing FMP_API_KEY secret, "
+                "or the FMP daily call budget is exhausted (see Logs below)."
+            )
 
 with st.expander("Edit ticker list"):
     st.caption("Edit rows, add/delete, then click **Refresh data**.")
@@ -194,7 +214,7 @@ with st.expander("Edit ticker list"):
     else:
         st.warning("No cached snapshot — click **Refresh data**.")
 
-if refresh or st.session_state.pop("_do_refresh", False):
+if refresh:
     clean = (
         st.session_state["tickers_df"]
         .dropna(subset=["ticker"])
