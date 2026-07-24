@@ -244,6 +244,7 @@ with st.expander("Diagnostics: missing fields per ticker"):
         )
         st.code(diag_text, language=None)
         st.caption(
-            "Yahoo's free feed has gaps — common nulls: `debt_assets` (totalAssets not "
-            "in .info), `next_earnings`, forward growth, and certain non-US tickers."
+            "Yahoo's free feed has gaps — common nulls: `next_earnings`, forward "
+            "growth, bank tickers (no FCF/EBITDA-based metrics), and certain "
+            "non-US tickers."
         )

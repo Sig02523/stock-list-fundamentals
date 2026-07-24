@@ -260,6 +260,10 @@ def _fetch_one(
     div_yield_n = _num(div_yield)
     if div_yield_n is not None:
         div_yield_n = div_yield_n / 100.0
+    elif _num(market_cap) is not None:
+        # Yahoo omits dividendYield entirely for non-payers; only treat it as
+        # missing when the whole .info fetch came back empty.
+        div_yield_n = 0.0
 
     # debtToEquity from Yahoo is in percent (e.g. 150.0 means 1.50). Normalize.
     de_n = _num(debt_equity)
@@ -300,6 +304,17 @@ def _fetch_one(
     total_revenue = _num(info.get("totalRevenue"))
     total_debt = _num(info.get("totalDebt"))
     total_assets = _num(info.get("totalAssets"))
+    if total_assets is None:
+        # .info only carries totalAssets for funds/ETFs; equities need the
+        # balance sheet.
+        bs = _retry(lambda: tk.balance_sheet)
+        if isinstance(bs, pd.DataFrame) and not bs.empty:
+            latest_bs = bs.iloc[:, 0]
+            for key in ("Total Assets", "TotalAssets"):
+                if key in bs.index:
+                    total_assets = _num(latest_bs.get(key))
+                    if total_assets is not None:
+                        break
     total_cash = _num(info.get("totalCash"))
     mcap = _num(market_cap)
     # EBIT and interest expense aren't on .info reliably; pull from financials best-effort.
