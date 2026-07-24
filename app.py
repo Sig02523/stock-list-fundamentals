@@ -164,8 +164,21 @@ report = report[COLUMNS]
 # ---- Styled, sortable table ----------------------------------------------
 
 display = report.copy()
+display = display.drop(columns=["sector", "industry"], errors="ignore")
 labels = {c: EXCEL_FORMATS.get(c, (c, "@"))[0] for c in display.columns}
 display = display.rename(columns=labels)
+
+
+def _abbrev_dollars(val: object) -> str:
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    for div, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if abs(v) >= div:
+            x = v / div
+            return f"{x:.0f}{suffix}" if abs(x) >= 100 else f"{x:.1f}{suffix}"
+    return f"{v:,.0f}"
 
 
 def _color_signed(val: object) -> str:
@@ -200,9 +213,9 @@ ratio_cols = [
     )
 ]
 money_cols = [labels[c] for c in ("last_price", "fifty_two_week_high", "fifty_two_week_low")]
-int_cols = [labels[c] for c in ("market_cap", "free_cash_flow", "avg_dollar_vol_30d")]
+int_cols = [labels[c] for c in ("free_cash_flow", "avg_dollar_vol_30d")]
 
-fmt: dict[str, str] = {}
+fmt: dict[str, object] = {labels["market_cap"]: _abbrev_dollars}
 for c in percent_cols:
     fmt[c] = "{:+.2%}"
 for c in ratio_cols:
