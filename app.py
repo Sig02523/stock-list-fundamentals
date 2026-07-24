@@ -169,8 +169,7 @@ if add_clicked and new_ticker.strip():
         st.session_state["_do_refresh"] = True
         st.rerun()
 
-with st.sidebar:
-    st.header("Tickers")
+with st.expander("Edit ticker list"):
     st.caption("Edit rows, add/delete, then click **Refresh data**.")
     edited = st.data_editor(
         st.session_state["tickers_df"],
@@ -187,11 +186,11 @@ with st.sidebar:
     )
     st.session_state["tickers_df"] = edited
 
-    refresh = st.button("Refresh data", type="primary", use_container_width=True)
+    refresh = st.button("Refresh data", type="primary")
 
     if snapshot is not None and "as_of" in snapshot.columns and not snapshot.empty:
         as_of = snapshot["as_of"].dropna().iloc[0] if snapshot["as_of"].notna().any() else "unknown"
-        st.info(f"Cached snapshot as of {as_of}")
+        st.caption(f"Cached snapshot as of {as_of}")
     else:
         st.warning("No cached snapshot — click **Refresh data**.")
 
