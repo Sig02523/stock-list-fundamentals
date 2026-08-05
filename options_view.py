@@ -213,17 +213,30 @@ def render() -> None:
         if chain.empty:
             st.warning(f"No {(cp or 'call').lower()}s listed for {ticker} {expiry}.")
             return
+        spot = chain["underlying_price"].dropna()
+        spot_txt = f", spot {spot.iloc[0]:,.2f}" if not spot.empty else ""
         show = chain[["strike"] + QUOTE_COLS + ["open_interest", "volume"]]
         show = show.sort_values("strike")
         scope = f"{len(show)} strikes"
         if strike_near:
+            lo, hi = show["strike"].min(), show["strike"].max()
+            if strike_near > hi:
+                st.warning(
+                    f"{strike_near:g} is above the highest listed strike "
+                    f"({hi:g}) for {ticker} {expiry} — showing the top of the chain."
+                )
+            elif strike_near < lo:
+                st.warning(
+                    f"{strike_near:g} is below the lowest listed strike "
+                    f"({lo:g}) for {ticker} {expiry} — showing the bottom of the chain."
+                )
             below = show[show["strike"] < strike_near].tail(5)
             at = show[show["strike"] == strike_near]
             above = show[show["strike"] > strike_near].head(5)
             show = pd.concat([below, at, above])
             scope = f"{len(show)} strikes around {strike_near:g}"
         st.caption(
-            f"{ticker} {expiry} {(cp or 'call').lower()}s — {scope}, "
+            f"{ticker} {expiry} {(cp or 'call').lower()}s — {scope}{spot_txt}, "
             f"as of **{_stamp()}**" + (" — live" if live_on else "")
         )
         st.dataframe(
