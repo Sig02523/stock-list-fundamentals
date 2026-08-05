@@ -54,10 +54,15 @@ def normalize_underlying(ticker: str) -> str:
 
 
 def build_occ(ticker: str, expiry_iso: str, contract_type: str, strike: float) -> str:
-    """OCC symbol with Polygon's `O:` prefix, e.g. O:AAPL260918C00230000."""
+    """OCC symbol with Polygon's `O:` prefix, e.g. O:AAPL260918C00230000.
+
+    OCC roots are dotless: underlying BRK.B -> root BRKB (the underlying
+    symbol in URL paths keeps the dot; only the contract root drops it).
+    """
+    root = "".join(ch for ch in ticker.upper() if ch.isalnum())
     yymmdd = expiry_iso.replace("-", "")[2:]
     cp = "C" if contract_type.lower().startswith("c") else "P"
-    return f"O:{ticker.upper()}{yymmdd}{cp}{int(round(strike * 1000)):08d}"
+    return f"O:{root}{yymmdd}{cp}{int(round(strike * 1000)):08d}"
 
 
 def list_expirations(ticker: str) -> list[str]:
