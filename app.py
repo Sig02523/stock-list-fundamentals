@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 import streamlit as st
 
-# Streamlit Cloud provides the FMP key via st.secrets; the FMP client reads it
-# from the environment (locally .env via python-dotenv). Bridge the two.
+# Streamlit Cloud provides secrets via st.secrets; clients read them from the
+# environment (locally .env via python-dotenv). Bridge the two.
 try:
-    if "FMP_API_KEY" in st.secrets:
-        os.environ.setdefault("FMP_API_KEY", st.secrets["FMP_API_KEY"])
+    for _k in ("FMP_API_KEY", "POLYGON_API_KEY", "LOG_GIST_ID", "LOG_GIST_TOKEN"):
+        if _k in st.secrets:
+            os.environ.setdefault(_k, st.secrets[_k])
 except Exception:
     pass
 
@@ -45,13 +49,67 @@ st.set_page_config(
 # session — fine for a single-user dashboard.
 # ---------------------------------------------------------------------------
 
+_MAX_LOG_LINES = 400
+_DUP_RE = re.compile(r" \(x(\d+)\)$")
+
+
+def _scrub(msg: str) -> str:
+    """Never let an API key reach the log buffer (e.g. via a request URL)."""
+    return re.sub(r"(api[_-]?key=)[^&\s'\"]+", r"\1***", msg, flags=re.I)
+
+
+def _log_core(line: str) -> str:
+    """Line minus timestamp and any (xN) repeat suffix, for dedup compare."""
+    core = line.split(" ", 1)[1] if " " in line else line
+    return _DUP_RE.sub("", core)
+
+
+def _ship_logs(lines: list[str]) -> None:
+    """Mirror the tail of the log buffer to a private gist (throttled, async)
+    so errors can be read remotely without console access."""
+    gid, tok = os.environ.get("LOG_GIST_ID"), os.environ.get("LOG_GIST_TOKEN")
+    if not (gid and tok):
+        return
+    now = time.time()
+    if now - getattr(_ship_logs, "_last", 0.0) < 20:
+        return
+    _ship_logs._last = now
+    content = "\n".join(lines[-200:]) or "(empty)"
+
+    def _post() -> None:
+        try:
+            requests.patch(
+                f"https://api.github.com/gists/{gid}",
+                json={"files": {"jdctickers-errors.log": {"content": content}}},
+                headers={
+                    "Authorization": f"Bearer {tok}",
+                    "Accept": "application/vnd.github+json",
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass  # log shipping must never break the app
+
+    threading.Thread(target=_post, daemon=True).start()
+
+
 class _SessionLogHandler(logging.Handler):
     def __init__(self, buf: list[str]) -> None:
         super().__init__(level=logging.INFO)
         self.buf = buf
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.buf.append(self.format(record))
+        msg = _scrub(self.format(record))
+        # Collapse consecutive repeats (live 5s refresh can retry the same
+        # failure) into one line with an (xN) counter.
+        if self.buf and _log_core(self.buf[-1]) == _log_core(msg):
+            n = int(m.group(1)) + 1 if (m := _DUP_RE.search(self.buf[-1])) else 2
+            self.buf[-1] = _DUP_RE.sub("", self.buf[-1]) + f" (x{n})"
+        else:
+            self.buf.append(msg)
+        del self.buf[:-_MAX_LOG_LINES]
+        if record.levelno >= logging.ERROR:
+            _ship_logs(self.buf)
 
 
 if "_logs" not in st.session_state:

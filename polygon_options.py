@@ -48,6 +48,11 @@ def _get(path_or_url: str, **params: Any) -> dict:
     return data
 
 
+def normalize_underlying(ticker: str) -> str:
+    """User input -> Polygon symbology: BRK/B and BRK B -> BRK.B; strip $."""
+    return ticker.strip().upper().replace("/", ".").replace(" ", ".").lstrip("$")
+
+
 def build_occ(ticker: str, expiry_iso: str, contract_type: str, strike: float) -> str:
     """OCC symbol with Polygon's `O:` prefix, e.g. O:AAPL260918C00230000."""
     yymmdd = expiry_iso.replace("-", "")[2:]
@@ -120,7 +125,12 @@ def chain_snapshot(ticker: str, expiry_iso: str, contract_type: str) -> list[dic
         "sort": "strike_price",
     }
     for _ in range(MAX_PAGES):
-        data = _get(url, **params)
+        try:
+            data = _get(url, **params)
+        except PolygonError as e:
+            if "HTTP 404" in str(e):
+                return []  # unknown underlying / no contracts — not an error
+            raise
         rows.extend(_row_from_snapshot(r) for r in data.get("results", []))
         nxt = data.get("next_url")
         if not nxt:

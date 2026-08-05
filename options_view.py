@@ -16,6 +16,7 @@ from polygon_options import (
     chain_snapshot,
     contract_snapshot,
     list_expirations,
+    normalize_underlying,
 )
 
 logger = logging.getLogger("stocklist")
@@ -38,7 +39,7 @@ _NUM_FMT = {
 }
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner="Loading expiries...")
 def _expirations(ticker: str) -> list[str]:
     return list_expirations(ticker)
 
@@ -125,7 +126,7 @@ def render() -> None:
         st.info("No positions yet — add rows under **Edit positions**.")
     else:
         records = tuple(
-            (str(r.ticker).strip().upper(), str(r.expiry).strip(),
+            (normalize_underlying(str(r.ticker)), str(r.expiry).strip(),
              str(r.type).strip().lower(), float(r.strike),
              float(r.qty) if pd.notna(r.qty) else None)
             for r in pos.itertuples(index=False)
@@ -185,9 +186,9 @@ def render() -> None:
         "Strike (optional)", value=None, min_value=0.0, step=1.0,
         key="opt_strike", help="Show only the 5 strikes above and below this",
     )
-    ticker = (ticker or "").strip().upper()
+    ticker = normalize_underlying(ticker or "")
     if not ticker:
-        st.caption("Type a ticker to load its expiries.")
+        st.caption("Type a ticker (press Enter) to load its expiries.")
         return
 
     try:
