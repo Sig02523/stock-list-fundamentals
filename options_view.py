@@ -176,10 +176,14 @@ def render() -> None:
 
     # ---- Lookup ------------------------------------------------------------
     st.subheader("Option lookup")
-    c1, c2, c3 = st.columns([2, 2, 3])
+    c1, c2, c3, c4 = st.columns([2, 2, 3, 2])
     ticker = c1.text_input("Ticker", placeholder="e.g. NVDA", key="opt_ticker")
     cp = c2.segmented_control(
         "Type", options=["Call", "Put"], default="Call", key="opt_cp"
+    )
+    strike_near = c4.number_input(
+        "Strike (optional)", value=None, min_value=0.0, step=1.0,
+        key="opt_strike", help="Show only the 5 strikes above and below this",
     )
     ticker = (ticker or "").strip().upper()
     if not ticker:
@@ -209,8 +213,16 @@ def render() -> None:
             st.warning(f"No {(cp or 'call').lower()}s listed for {ticker} {expiry}.")
             return
         show = chain[["strike"] + QUOTE_COLS + ["open_interest", "volume"]]
+        show = show.sort_values("strike")
+        scope = f"{len(show)} strikes"
+        if strike_near:
+            below = show[show["strike"] < strike_near].tail(5)
+            at = show[show["strike"] == strike_near]
+            above = show[show["strike"] > strike_near].head(5)
+            show = pd.concat([below, at, above])
+            scope = f"{len(show)} strikes around {strike_near:g}"
         st.caption(
-            f"{ticker} {expiry} {(cp or 'call').lower()}s — {len(show)} strikes, "
+            f"{ticker} {expiry} {(cp or 'call').lower()}s — {scope}, "
             f"as of **{_stamp()}**" + (" — live" if live_on else "")
         )
         st.dataframe(
