@@ -89,6 +89,23 @@ def list_expirations(ticker: str) -> list[str]:
     return sorted(expiries)
 
 
+def expiries_with_strike(ticker: str, strike: float, direction: str = "gte") -> list[str]:
+    """Unexpired expiries that list strikes at/above (gte) or at/below (lte)
+    the given level. One reference-endpoint page — used for messaging when a
+    requested strike is outside the selected expiry's range."""
+    data = _get(
+        "/v3/reference/options/contracts",
+        underlying_ticker=ticker.upper(),
+        expired="false",
+        contract_type="call",
+        limit=1000,
+        order="asc",
+        sort="expiration_date",
+        **{f"strike_price.{direction}": strike},
+    )
+    return sorted({c["expiration_date"] for c in data.get("results", []) if c.get("expiration_date")})
+
+
 def _row_from_snapshot(r: dict) -> dict:
     """Flatten one snapshot result into a display row."""
     details = r.get("details", {}) or {}

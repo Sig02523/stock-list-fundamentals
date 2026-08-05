@@ -15,6 +15,7 @@ from polygon_options import (
     build_occ,
     chain_snapshot,
     contract_snapshot,
+    expiries_with_strike,
     list_expirations,
     normalize_underlying,
 )
@@ -47,6 +48,14 @@ def _expirations(ticker: str) -> list[str]:
 @st.cache_data(ttl=4, show_spinner=False)
 def _chain(ticker: str, expiry: str, cp: str) -> pd.DataFrame:
     return pd.DataFrame(chain_snapshot(ticker, expiry, cp))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _expiries_with_strike(ticker: str, strike: float, direction: str) -> list[str]:
+    try:
+        return expiries_with_strike(ticker, strike, direction)
+    except PolygonError:
+        return []
 
 
 def _fetch_positions(records: tuple) -> pd.DataFrame:
@@ -220,16 +229,26 @@ def render() -> None:
         scope = f"{len(show)} strikes"
         if strike_near:
             lo, hi = show["strike"].min(), show["strike"].max()
-            if strike_near > hi:
-                st.warning(
-                    f"{strike_near:g} is above the highest listed strike "
-                    f"({hi:g}) for {ticker} {expiry} — showing the top of the chain."
+            if strike_near > hi or strike_near < lo:
+                side = "above the highest" if strike_near > hi else "below the lowest"
+                bound = hi if strike_near > hi else lo
+                msg = (
+                    f"{strike_near:g} is {side} listed strike ({bound:g}) for "
+                    f"**this expiry** ({expiry})."
                 )
-            elif strike_near < lo:
-                st.warning(
-                    f"{strike_near:g} is below the lowest listed strike "
-                    f"({lo:g}) for {ticker} {expiry} — showing the bottom of the chain."
+                alt = _expiries_with_strike(
+                    ticker, strike_near, "gte" if strike_near > hi else "lte"
                 )
+                alt = [d for d in alt if d != expiry]
+                if alt:
+                    msg += (
+                        f" Strikes {'≥' if strike_near > hi else '≤'} "
+                        f"{strike_near:g} are listed from **{alt[0]}** onward — "
+                        "pick a later expiry in the dropdown."
+                    )
+                else:
+                    msg += f" No {ticker} expiry lists a strike that far out."
+                st.warning(msg + " Showing the nearest edge of this chain.")
             below = show[show["strike"] < strike_near].tail(5)
             at = show[show["strike"] == strike_near]
             above = show[show["strike"] > strike_near].head(5)
