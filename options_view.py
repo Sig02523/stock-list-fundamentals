@@ -60,6 +60,7 @@ def _position_rows(pos_records: tuple) -> pd.DataFrame:
             "strike": strike, "qty": qty,
         }
         row.update({c: (snap or {}).get(c) for c in QUOTE_COLS})
+        row["underlying_price"] = (snap or {}).get("underlying_price")
         if snap is None:
             logger.warning("[%s] no snapshot — check expiry/strike are listed", occ)
         rows.append(row)
@@ -117,9 +118,35 @@ def render() -> None:
         try:
             live = _position_rows(records)
             st.dataframe(
-                live, use_container_width=True, hide_index=True,
+                live.drop(columns=["underlying_price"]),
+                use_container_width=True, hide_index=True,
                 column_config=_NUM_FMT,
             )
+
+            # Delta-dollars rollup per underlying: qty x 100 x delta x spot.
+            dd = live.dropna(subset=["qty", "delta", "underlying_price"]).copy()
+            if not dd.empty:
+                dd["delta_dollars"] = dd["qty"] * 100 * dd["delta"] * dd["underlying_price"]
+                roll = (
+                    dd.groupby("ticker")
+                    .agg(spot=("underlying_price", "last"), delta_dollars=("delta_dollars", "sum"))
+                    .reset_index()
+                )
+                total = pd.DataFrame(
+                    [{"ticker": "TOTAL", "spot": None, "delta_dollars": roll["delta_dollars"].sum()}]
+                )
+                st.caption("Delta $ by underlying")
+                st.dataframe(
+                    pd.concat([roll, total], ignore_index=True),
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "ticker": st.column_config.TextColumn("Ticker"),
+                        "spot": st.column_config.NumberColumn("Spot", format="%.2f"),
+                        "delta_dollars": st.column_config.NumberColumn(
+                            "Delta $", format="accounting"
+                        ),
+                    },
+                )
         except PolygonError as err:
             logger.error("Positions fetch failed: %r", err)
             st.error(f"Couldn't fetch position quotes: {err}")

@@ -104,6 +104,7 @@ def _row_from_snapshot(r: dict) -> dict:
         "theta": greeks.get("theta"),
         "open_interest": r.get("open_interest"),
         "volume": day.get("volume"),
+        "underlying_price": (r.get("underlying_asset") or {}).get("price"),
     }
 
 
