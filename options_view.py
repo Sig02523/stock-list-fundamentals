@@ -202,6 +202,13 @@ def render() -> None:
 
     try:
         expiries = _expirations(ticker)
+        if not expiries and ticker.isalpha() and len(ticker) > 2:
+            # Dotless class-share input (BRKB) -> retry as BRK.B
+            alt = f"{ticker[:-1]}.{ticker[-1]}"
+            if _expirations(alt):
+                ticker = alt
+                expiries = _expirations(alt)
+                st.caption(f"Interpreting as **{ticker}**.")
     except PolygonError as err:
         logger.error("[%s] expiry fetch failed: %r", ticker, err)
         st.error(f"Couldn't load expiries for {ticker}: {err}")
