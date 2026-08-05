@@ -56,13 +56,18 @@ def build_occ(ticker: str, expiry_iso: str, contract_type: str, strike: float) -
 
 
 def list_expirations(ticker: str) -> list[str]:
-    """Distinct unexpired expiration dates for an underlying, ascending."""
+    """Distinct unexpired expiration dates for an underlying, ascending.
+
+    Calls-only (put expiries are identical) at the endpoint's 1000/page max —
+    date discovery needs far fewer requests than paging the full chain.
+    """
     expiries: set[str] = set()
     url = "/v3/reference/options/contracts"
     params: dict[str, Any] = {
         "underlying_ticker": ticker.upper(),
         "expired": "false",
-        "limit": PAGE_LIMIT,
+        "contract_type": "call",
+        "limit": 1000,
         "order": "asc",
         "sort": "expiration_date",
     }
