@@ -1,0 +1,175 @@
+"""Options tab: positions with live quotes/greeks + chain lookup (Polygon)."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+from polygon_options import (
+    PolygonError,
+    build_occ,
+    chain_snapshot,
+    contract_snapshot,
+    list_expirations,
+)
+
+logger = logging.getLogger("stocklist")
+POSITIONS_CSV = Path(__file__).resolve().parent / "positions.csv"
+
+QUOTE_COLS = ["bid", "ask", "ivm", "delta", "gamma", "vega", "theta"]
+
+_NUM_FMT = {
+    "strike": st.column_config.NumberColumn("Strike", format="%.2f"),
+    "bid": st.column_config.NumberColumn("Bid", format="%.2f"),
+    "ask": st.column_config.NumberColumn("Offer", format="%.2f"),
+    "ivm": st.column_config.NumberColumn("IVM", format="percent"),
+    "delta": st.column_config.NumberColumn("Delta", format="%.4f"),
+    "gamma": st.column_config.NumberColumn("Gamma", format="%.4f"),
+    "vega": st.column_config.NumberColumn("Vega", format="%.4f"),
+    "theta": st.column_config.NumberColumn("Theta", format="%.4f"),
+    "open_interest": st.column_config.NumberColumn("OI", format="%d"),
+    "volume": st.column_config.NumberColumn("Volume", format="%d"),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _expirations(ticker: str) -> list[str]:
+    return list_expirations(ticker)
+
+
+@st.cache_data(ttl=60, show_spinner="Fetching chain...")
+def _chain(ticker: str, expiry: str, cp: str) -> pd.DataFrame:
+    return pd.DataFrame(chain_snapshot(ticker, expiry, cp))
+
+
+@st.cache_data(ttl=60, show_spinner="Fetching position quotes...")
+def _position_rows(pos_records: tuple) -> pd.DataFrame:
+    rows = []
+    for ticker, expiry, cp, strike, qty in pos_records:
+        occ = build_occ(ticker, expiry, cp, strike)
+        snap = None
+        try:
+            snap = contract_snapshot(ticker, occ)
+        except PolygonError as err:
+            logger.error("[%s] position fetch failed: %r", occ, err)
+        row = {
+            "ticker": ticker, "expiry": expiry, "type": cp,
+            "strike": strike, "qty": qty,
+        }
+        row.update({c: (snap or {}).get(c) for c in QUOTE_COLS})
+        if snap is None:
+            logger.warning("[%s] no snapshot — check expiry/strike are listed", occ)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _load_positions() -> pd.DataFrame:
+    if POSITIONS_CSV.exists():
+        df = pd.read_csv(POSITIONS_CSV)
+    else:
+        df = pd.DataFrame(columns=["ticker", "expiry", "type", "strike", "qty"])
+    return df
+
+
+def render() -> None:
+    # ---- Positions ---------------------------------------------------------
+    st.subheader("Positions")
+    if "positions_df" not in st.session_state:
+        st.session_state["positions_df"] = _load_positions()
+
+    with st.expander("Edit positions"):
+        st.caption(
+            "Session-only edits — to make positions permanent, commit them to "
+            "`positions.csv` in the repo."
+        )
+        edited = st.data_editor(
+            st.session_state["positions_df"],
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "ticker": st.column_config.TextColumn("Ticker", required=True),
+                "expiry": st.column_config.TextColumn(
+                    "Expiry", help="YYYY-MM-DD", required=True
+                ),
+                "type": st.column_config.SelectboxColumn(
+                    "Type", options=["call", "put"], required=True
+                ),
+                "strike": st.column_config.NumberColumn("Strike", required=True),
+                "qty": st.column_config.NumberColumn("Qty"),
+            },
+            key="positions_editor",
+        )
+        st.session_state["positions_df"] = edited
+
+    pos = st.session_state["positions_df"].dropna(subset=["ticker", "expiry", "strike"])
+    if pos.empty:
+        st.info("No positions yet — add rows under **Edit positions**.")
+    else:
+        records = tuple(
+            (str(r.ticker).strip().upper(), str(r.expiry).strip(),
+             str(r.type).strip().lower(), float(r.strike),
+             float(r.qty) if pd.notna(r.qty) else None)
+            for r in pos.itertuples(index=False)
+        )
+        try:
+            live = _position_rows(records)
+            st.dataframe(
+                live, use_container_width=True, hide_index=True,
+                column_config=_NUM_FMT,
+            )
+        except PolygonError as err:
+            logger.error("Positions fetch failed: %r", err)
+            st.error(f"Couldn't fetch position quotes: {err}")
+        if st.button("Refresh quotes"):
+            _position_rows.clear()
+            _chain.clear()
+            st.rerun()
+
+    st.divider()
+
+    # ---- Lookup ------------------------------------------------------------
+    st.subheader("Option lookup")
+    c1, c2, c3 = st.columns([2, 2, 3])
+    ticker = c1.text_input("Ticker", placeholder="e.g. NVDA", key="opt_ticker")
+    cp = c2.segmented_control(
+        "Type", options=["Call", "Put"], default="Call", key="opt_cp"
+    )
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        st.caption("Type a ticker to load its expiries.")
+        return
+
+    try:
+        expiries = _expirations(ticker)
+    except PolygonError as err:
+        logger.error("[%s] expiry fetch failed: %r", ticker, err)
+        st.error(f"Couldn't load expiries for {ticker}: {err}")
+        return
+    if not expiries:
+        st.warning(f"No listed options found for {ticker}.")
+        return
+
+    expiry = c3.selectbox("Expiry", expiries, key="opt_expiry")
+    try:
+        chain = _chain(ticker, expiry, (cp or "Call").lower())
+    except PolygonError as err:
+        logger.error("[%s] chain fetch failed: %r", ticker, err)
+        st.error(f"Couldn't fetch the {ticker} chain: {err}")
+        return
+    if chain.empty:
+        st.warning(f"No {cp.lower()}s listed for {ticker} {expiry}.")
+        return
+
+    show = chain[["strike"] + QUOTE_COLS + ["open_interest", "volume"]]
+    st.caption(f"{ticker} {expiry} {cp.lower()}s — {len(show)} strikes (quotes cached ≤60s)")
+    st.dataframe(
+        show, use_container_width=True, hide_index=True,
+        column_config={
+            **_NUM_FMT,
+            "strike": st.column_config.NumberColumn("Strike", format="%.2f", pinned=True),
+        },
+        height=min(38 + 35 * len(show), 600),
+    )
