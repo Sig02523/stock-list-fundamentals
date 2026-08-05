@@ -1,8 +1,10 @@
-"""Options tab: positions with live quotes/greeks + chain lookup (Polygon)."""
+"""Options tab: live-ticking positions/greeks + chain lookup (Polygon)."""
 
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +22,7 @@ logger = logging.getLogger("stocklist")
 POSITIONS_CSV = Path(__file__).resolve().parent / "positions.csv"
 
 QUOTE_COLS = ["bid", "ask", "ivm", "delta", "gamma", "vega", "theta"]
+LIVE_INTERVAL = "5s"
 
 _NUM_FMT = {
     "strike": st.column_config.NumberColumn("Strike", format="%.2f"),
@@ -40,15 +43,16 @@ def _expirations(ticker: str) -> list[str]:
     return list_expirations(ticker)
 
 
-@st.cache_data(ttl=60, show_spinner="Fetching chain...")
+@st.cache_data(ttl=4, show_spinner=False)
 def _chain(ticker: str, expiry: str, cp: str) -> pd.DataFrame:
     return pd.DataFrame(chain_snapshot(ticker, expiry, cp))
 
 
-@st.cache_data(ttl=60, show_spinner="Fetching position quotes...")
-def _position_rows(pos_records: tuple) -> pd.DataFrame:
-    rows = []
-    for ticker, expiry, cp, strike, qty in pos_records:
+def _fetch_positions(records: tuple) -> pd.DataFrame:
+    """Live quotes for every position, fetched in parallel (no cache)."""
+
+    def one(rec):
+        ticker, expiry, cp, strike, qty = rec
         occ = build_occ(ticker, expiry, cp, strike)
         snap = None
         try:
@@ -61,21 +65,32 @@ def _position_rows(pos_records: tuple) -> pd.DataFrame:
         }
         row.update({c: (snap or {}).get(c) for c in QUOTE_COLS})
         row["underlying_price"] = (snap or {}).get("underlying_price")
-        if snap is None:
-            logger.warning("[%s] no snapshot — check expiry/strike are listed", occ)
-        rows.append(row)
+        return row
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(one, records))
     return pd.DataFrame(rows)
 
 
 def _load_positions() -> pd.DataFrame:
     if POSITIONS_CSV.exists():
-        df = pd.read_csv(POSITIONS_CSV)
-    else:
-        df = pd.DataFrame(columns=["ticker", "expiry", "type", "strike", "qty"])
-    return df
+        return pd.read_csv(POSITIONS_CSV)
+    return pd.DataFrame(columns=["ticker", "expiry", "type", "strike", "qty"])
+
+
+def _stamp() -> str:
+    return f"{datetime.now(timezone.utc):%H:%M:%S} UTC"
 
 
 def render() -> None:
+    # ---- Controls ----------------------------------------------------------
+    c_live, c_btn, _ = st.columns([2, 2, 4])
+    live_on = c_live.toggle(f"Live quotes (every {LIVE_INTERVAL})", value=True)
+    if c_btn.button("🔄 Refresh now", type="primary", use_container_width=True):
+        _chain.clear()
+        st.rerun()
+    run_every = LIVE_INTERVAL if live_on else None
+
     # ---- Positions ---------------------------------------------------------
     st.subheader("Positions")
     if "positions_df" not in st.session_state:
@@ -115,8 +130,15 @@ def render() -> None:
              float(r.qty) if pd.notna(r.qty) else None)
             for r in pos.itertuples(index=False)
         )
-        try:
-            live = _position_rows(records)
+
+        def _positions_body() -> None:
+            try:
+                live = _fetch_positions(records)
+            except Exception as err:
+                logger.error("Positions fetch failed: %r", err)
+                st.error(f"Couldn't fetch position quotes: {err}")
+                return
+            st.caption(f"Quotes as of **{_stamp()}**" + (" — live" if live_on else ""))
             st.dataframe(
                 live.drop(columns=["underlying_price"]),
                 use_container_width=True, hide_index=True,
@@ -147,13 +169,8 @@ def render() -> None:
                         ),
                     },
                 )
-        except PolygonError as err:
-            logger.error("Positions fetch failed: %r", err)
-            st.error(f"Couldn't fetch position quotes: {err}")
-        if st.button("Refresh quotes"):
-            _position_rows.clear()
-            _chain.clear()
-            st.rerun()
+
+        st.fragment(_positions_body, run_every=run_every)()
 
     st.divider()
 
@@ -180,23 +197,29 @@ def render() -> None:
         return
 
     expiry = c3.selectbox("Expiry", expiries, key="opt_expiry")
-    try:
-        chain = _chain(ticker, expiry, (cp or "Call").lower())
-    except PolygonError as err:
-        logger.error("[%s] chain fetch failed: %r", ticker, err)
-        st.error(f"Couldn't fetch the {ticker} chain: {err}")
-        return
-    if chain.empty:
-        st.warning(f"No {cp.lower()}s listed for {ticker} {expiry}.")
-        return
 
-    show = chain[["strike"] + QUOTE_COLS + ["open_interest", "volume"]]
-    st.caption(f"{ticker} {expiry} {cp.lower()}s — {len(show)} strikes (quotes cached ≤60s)")
-    st.dataframe(
-        show, use_container_width=True, hide_index=True,
-        column_config={
-            **_NUM_FMT,
-            "strike": st.column_config.NumberColumn("Strike", format="%.2f", pinned=True),
-        },
-        height=min(38 + 35 * len(show), 600),
-    )
+    def _chain_body() -> None:
+        try:
+            chain = _chain(ticker, expiry, (cp or "Call").lower())
+        except PolygonError as err:
+            logger.error("[%s] chain fetch failed: %r", ticker, err)
+            st.error(f"Couldn't fetch the {ticker} chain: {err}")
+            return
+        if chain.empty:
+            st.warning(f"No {(cp or 'call').lower()}s listed for {ticker} {expiry}.")
+            return
+        show = chain[["strike"] + QUOTE_COLS + ["open_interest", "volume"]]
+        st.caption(
+            f"{ticker} {expiry} {(cp or 'call').lower()}s — {len(show)} strikes, "
+            f"as of **{_stamp()}**" + (" — live" if live_on else "")
+        )
+        st.dataframe(
+            show, use_container_width=True, hide_index=True,
+            column_config={
+                **_NUM_FMT,
+                "strike": st.column_config.NumberColumn("Strike", format="%.2f", pinned=True),
+            },
+            height=min(38 + 35 * len(show), 600),
+        )
+
+    st.fragment(_chain_body, run_every=run_every)()
