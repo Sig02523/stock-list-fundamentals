@@ -94,6 +94,34 @@ def _stamp() -> str:
     return f"{datetime.now(ZoneInfo('America/New_York')):%H:%M:%S} ET"
 
 
+def _color_signed(val: object) -> str:
+    try:
+        v = float(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if pd.isna(v):
+        return ""
+    if v > 0:
+        return "color: #1a7f37; font-weight: 600;"
+    if v < 0:
+        return "color: #cf222e; font-weight: 600;"
+    return ""
+
+
+_POS_LABELS = {
+    "ticker": "Ticker", "expiry": "Expiry", "type": "Type", "strike": "Strike",
+    "qty": "Qty", "spot": "Spot", "chg": "Chg $", "chg_pct": "Chg %",
+    "bid": "Bid", "ask": "Offer", "ivm": "IVM", "delta": "Delta",
+    "gamma": "Gamma", "vega": "Vega", "theta": "Theta",
+}
+_POS_FMT = {
+    "Strike": "{:g}", "Qty": "{:g}", "Spot": "{:,.2f}",
+    "Chg $": "{:+.2f}", "Chg %": "{:+.2f}%",
+    "Bid": "{:.2f}", "Offer": "{:.2f}", "IVM": "{:.1%}",
+    "Delta": "{:.4f}", "Gamma": "{:.4f}", "Vega": "{:.4f}", "Theta": "{:.4f}",
+}
+
+
 def render() -> None:
     # ---- Controls ----------------------------------------------------------
     c_live, c_btn, _ = st.columns([2, 2, 4])
@@ -168,15 +196,11 @@ def render() -> None:
                 + QUOTE_COLS
             )
             st.caption(f"Quotes as of **{_stamp()}**" + (" — live" if live_on else ""))
+            disp = live[pos_cols].rename(columns=_POS_LABELS)
             st.dataframe(
-                live[pos_cols],
+                disp.style.format(_POS_FMT, na_rep="—")
+                .map(_color_signed, subset=["Chg $", "Chg %"]),
                 use_container_width=True, hide_index=True,
-                column_config={
-                    **_NUM_FMT,
-                    "spot": st.column_config.NumberColumn("Spot", format="%.2f"),
-                    "chg": st.column_config.NumberColumn("Chg $", format="%+.2f"),
-                    "chg_pct": st.column_config.NumberColumn("Chg %", format="%+.2f%%"),
-                },
             )
 
             dd = live.dropna(subset=["qty", "delta", "underlying_price"]).copy()
@@ -200,18 +224,17 @@ def render() -> None:
                 "delta_dollars": dd_by_ticker.sum(),
             })
             st.caption("By underlying")
+            roll_disp = pd.DataFrame(rows).rename(
+                columns={**_POS_LABELS, "delta_dollars": "Delta $"}
+            )
             st.dataframe(
-                pd.DataFrame(rows),
+                roll_disp.style.format(
+                    {"Spot": "{:,.2f}", "Chg $": "{:+.2f}", "Chg %": "{:+.2f}%",
+                     "Delta $": "{:,.0f}"},
+                    na_rep="—",
+                )
+                .map(_color_signed, subset=["Chg $", "Chg %"]),
                 use_container_width=True, hide_index=True,
-                column_config={
-                    "ticker": st.column_config.TextColumn("Ticker"),
-                    "spot": st.column_config.NumberColumn("Spot", format="%.2f"),
-                    "chg": st.column_config.NumberColumn("Chg $", format="%+.2f"),
-                    "chg_pct": st.column_config.NumberColumn("Chg %", format="%+.2f%%"),
-                    "delta_dollars": st.column_config.NumberColumn(
-                        "Delta $", format="accounting"
-                    ),
-                },
             )
 
         st.fragment(_positions_body, run_every=run_every)()
