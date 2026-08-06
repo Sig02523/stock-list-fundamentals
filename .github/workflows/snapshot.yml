@@ -2,8 +2,12 @@ name: Daily snapshot
 
 on:
   schedule:
-    # 12:00 UTC ≈ 07:00 America/New_York during EST, 08:00 during EDT.
+    # Pre-market daily baseline: 12:00 UTC ≈ 07:00 ET (EST) / 08:00 (EDT).
     - cron: "0 12 * * *"
+    # Hourly during/after US market hours, weekdays. GitHub cron is UTC-only:
+    # 13:35-21:35 UTC ≈ 09:35-17:35 ET during EDT (one hour earlier in EST —
+    # still inside the trading day, so no DST edit needed).
+    - cron: "35 13-21 * * 1-5"
   workflow_dispatch:
 
 permissions:

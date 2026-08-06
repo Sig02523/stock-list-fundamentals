@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -461,7 +462,7 @@ def build_report(tickers_df: pd.DataFrame, *, delay: float = 0.25) -> pd.DataFra
             logger.error("[%s] benchmark history unavailable — beta will be null", sym)
         bench_cache[sym] = h if isinstance(h, pd.DataFrame) else pd.DataFrame()
 
-    as_of = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    as_of = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
     rows: list[dict[str, Any]] = []
     for _, r in df.iterrows():
         try:

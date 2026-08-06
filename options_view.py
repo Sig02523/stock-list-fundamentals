@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -89,7 +90,7 @@ def _load_positions() -> pd.DataFrame:
 
 
 def _stamp() -> str:
-    return f"{datetime.now(timezone.utc):%H:%M:%S} UTC"
+    return f"{datetime.now(ZoneInfo('America/New_York')):%H:%M:%S} ET"
 
 
 def render() -> None:

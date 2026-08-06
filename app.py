@@ -9,6 +9,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 import pandas as pd
 import requests
@@ -122,8 +125,8 @@ for _h in list(logger.handlers):
     if isinstance(_h, _SessionLogHandler):
         logger.removeHandler(_h)
 _handler = _SessionLogHandler(LOGS)
-_fmt = logging.Formatter("%(asctime)sZ %(levelname)s %(message)s", "%Y-%m-%dT%H:%M:%S")
-_fmt.converter = time.gmtime
+_fmt = logging.Formatter("%(asctime)s ET %(levelname)s %(message)s", "%Y-%m-%dT%H:%M:%S")
+_fmt.converter = lambda secs: datetime.fromtimestamp(secs, _ET).timetuple()
 _handler.setFormatter(_fmt)
 logger.addHandler(_handler)
 
@@ -342,7 +345,9 @@ with tab_fund:
     }
     last_pull = st.session_state.get("last_pull_utc")
     if last_pull is not None:
-        st.caption(f"Last data pull: {last_pull:%Y-%m-%d %H:%M:%S} UTC (live this session)")
+        st.caption(
+            f"Last data pull: {last_pull.astimezone(_ET):%Y-%m-%d %H:%M:%S} ET (live this session)"
+        )
     elif report["as_of"].notna().any():
         st.caption(f"Last data pull: {report['as_of'].dropna().iloc[0]} (cached snapshot)")
 
