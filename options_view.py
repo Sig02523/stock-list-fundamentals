@@ -33,6 +33,7 @@ def _fmp() -> FMPClient:
     return FMPClient(delay=0)
 
 
+@st.cache_data(ttl=4, show_spinner=False)
 def _underlying_quotes(tickers: tuple[str, ...]) -> dict[str, dict]:
     """Real-time spot + day change per underlying from FMP (the Polygon
     options-only plan serves 15-min-delayed stock trades — do not use it for
