@@ -150,19 +150,34 @@ def render() -> None:
                 logger.error("Positions fetch failed: %r", err)
                 st.error(f"Couldn't fetch position quotes: {err}")
                 return
-            st.caption(f"Quotes as of **{_stamp()}**" + (" — live" if live_on else ""))
-            st.dataframe(
-                live.drop(columns=["underlying_price"]),
-                use_container_width=True, hide_index=True,
-                column_config=_NUM_FMT,
-            )
-
-            # Per-underlying rollup: spot, day change, delta dollars.
             und: dict[str, dict] = {}
             try:
                 und = stock_snapshots(sorted(live["ticker"].unique()))
             except PolygonError as err:
                 logger.warning("underlying snapshot fetch failed: %r", err)
+
+            # Underlying spot + day change on every position row.
+            live["spot"] = live["ticker"].map(
+                lambda t: und.get(t, {}).get("price")
+            ).fillna(live["underlying_price"])
+            live["chg"] = live["ticker"].map(lambda t: und.get(t, {}).get("chg"))
+            live["chg_pct"] = live["ticker"].map(lambda t: und.get(t, {}).get("chg_pct"))
+
+            pos_cols = (
+                ["ticker", "expiry", "type", "strike", "qty", "spot", "chg", "chg_pct"]
+                + QUOTE_COLS
+            )
+            st.caption(f"Quotes as of **{_stamp()}**" + (" — live" if live_on else ""))
+            st.dataframe(
+                live[pos_cols],
+                use_container_width=True, hide_index=True,
+                column_config={
+                    **_NUM_FMT,
+                    "spot": st.column_config.NumberColumn("Spot", format="%.2f"),
+                    "chg": st.column_config.NumberColumn("Chg $", format="%+.2f"),
+                    "chg_pct": st.column_config.NumberColumn("Chg %", format="%+.2f%%"),
+                },
+            )
 
             dd = live.dropna(subset=["qty", "delta", "underlying_price"]).copy()
             dd["delta_dollars"] = dd["qty"] * 100 * dd["delta"] * dd["underlying_price"]
