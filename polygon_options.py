@@ -94,6 +94,25 @@ def list_expirations(ticker: str) -> list[str]:
     return sorted(expiries)
 
 
+def stock_snapshots(tickers: list[str]) -> dict[str, dict]:
+    """Spot + day change for underlyings (stocks snapshot endpoint)."""
+    if not tickers:
+        return {}
+    data = _get(
+        "/v2/snapshot/locale/us/markets/stocks/tickers",
+        tickers=",".join(sorted({t.upper() for t in tickers})),
+    )
+    out: dict[str, dict] = {}
+    for t in data.get("tickers", []):
+        last = (t.get("lastTrade") or {}).get("p") or (t.get("min") or {}).get("c")
+        out[t["ticker"]] = {
+            "price": last,
+            "chg": t.get("todaysChange"),
+            "chg_pct": t.get("todaysChangePerc"),
+        }
+    return out
+
+
 def expiries_with_strike(ticker: str, strike: float, direction: str = "gte") -> list[str]:
     """Unexpired expiries that list strikes at/above (gte) or at/below (lte)
     the given level. One reference-endpoint page — used for messaging when a

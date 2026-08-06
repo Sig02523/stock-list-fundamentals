@@ -19,6 +19,7 @@ from polygon_options import (
     expiries_with_strike,
     list_expirations,
     normalize_underlying,
+    stock_snapshots,
 )
 
 logger = logging.getLogger("stocklist")
@@ -156,30 +157,47 @@ def render() -> None:
                 column_config=_NUM_FMT,
             )
 
-            # Delta-dollars rollup per underlying: qty x 100 x delta x spot.
+            # Per-underlying rollup: spot, day change, delta dollars.
+            und: dict[str, dict] = {}
+            try:
+                und = stock_snapshots(sorted(live["ticker"].unique()))
+            except PolygonError as err:
+                logger.warning("underlying snapshot fetch failed: %r", err)
+
             dd = live.dropna(subset=["qty", "delta", "underlying_price"]).copy()
-            if not dd.empty:
-                dd["delta_dollars"] = dd["qty"] * 100 * dd["delta"] * dd["underlying_price"]
-                roll = (
-                    dd.groupby("ticker")
-                    .agg(spot=("underlying_price", "last"), delta_dollars=("delta_dollars", "sum"))
-                    .reset_index()
-                )
-                total = pd.DataFrame(
-                    [{"ticker": "TOTAL", "spot": None, "delta_dollars": roll["delta_dollars"].sum()}]
-                )
-                st.caption("Delta $ by underlying")
-                st.dataframe(
-                    pd.concat([roll, total], ignore_index=True),
-                    use_container_width=True, hide_index=True,
-                    column_config={
-                        "ticker": st.column_config.TextColumn("Ticker"),
-                        "spot": st.column_config.NumberColumn("Spot", format="%.2f"),
-                        "delta_dollars": st.column_config.NumberColumn(
-                            "Delta $", format="accounting"
-                        ),
-                    },
-                )
+            dd["delta_dollars"] = dd["qty"] * 100 * dd["delta"] * dd["underlying_price"]
+            dd_by_ticker = dd.groupby("ticker")["delta_dollars"].sum()
+
+            rows = []
+            for t in sorted(live["ticker"].unique()):
+                u = und.get(t, {})
+                spot = u.get("price")
+                if spot is None:
+                    opt_spot = live.loc[live["ticker"] == t, "underlying_price"].dropna()
+                    spot = opt_spot.iloc[0] if not opt_spot.empty else None
+                rows.append({
+                    "ticker": t, "spot": spot,
+                    "chg": u.get("chg"), "chg_pct": u.get("chg_pct"),
+                    "delta_dollars": dd_by_ticker.get(t),
+                })
+            rows.append({
+                "ticker": "TOTAL", "spot": None, "chg": None, "chg_pct": None,
+                "delta_dollars": dd_by_ticker.sum(),
+            })
+            st.caption("By underlying")
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    "ticker": st.column_config.TextColumn("Ticker"),
+                    "spot": st.column_config.NumberColumn("Spot", format="%.2f"),
+                    "chg": st.column_config.NumberColumn("Chg $", format="%+.2f"),
+                    "chg_pct": st.column_config.NumberColumn("Chg %", format="%+.2f%%"),
+                    "delta_dollars": st.column_config.NumberColumn(
+                        "Delta $", format="accounting"
+                    ),
+                },
+            )
 
         st.fragment(_positions_body, run_every=run_every)()
 
