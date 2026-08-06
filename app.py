@@ -166,6 +166,18 @@ if not _password_gate():
 # Data loading: cached snapshot + live refresh
 # ---------------------------------------------------------------------------
 
+def _as_of_et(s: str) -> str:
+    """Render an as_of stamp in ET, converting legacy 'YYYY-mm-dd HH:MM UTC'
+    strings from snapshots built before the ET switch."""
+    try:
+        if isinstance(s, str) and s.endswith(" UTC"):
+            dt = datetime.strptime(s[:-4], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            return f"{dt.astimezone(_ET):%Y-%m-%d %H:%M} ET"
+    except Exception:
+        pass
+    return s
+
+
 def _load_snapshot() -> pd.DataFrame | None:
     path = REPO_ROOT / "snapshot.parquet"
     if not path.exists():
@@ -282,7 +294,7 @@ with tab_fund:
 
         if snapshot is not None and "as_of" in snapshot.columns and not snapshot.empty:
             as_of = snapshot["as_of"].dropna().iloc[0] if snapshot["as_of"].notna().any() else "unknown"
-            st.caption(f"Cached snapshot as of {as_of}")
+            st.caption(f"Cached snapshot as of {_as_of_et(as_of)}")
         else:
             st.warning("No cached snapshot — click **Refresh data**.")
 
@@ -349,7 +361,7 @@ with tab_fund:
             f"Last data pull: {last_pull.astimezone(_ET):%Y-%m-%d %H:%M:%S} ET (live this session)"
         )
     elif report["as_of"].notna().any():
-        st.caption(f"Last data pull: {report['as_of'].dropna().iloc[0]} (cached snapshot)")
+        st.caption(f"Last data pull: {_as_of_et(report['as_of'].dropna().iloc[0])} (cached snapshot)")
 
     view = st.radio("View", list(VIEW_GROUPS), horizontal=True, label_visibility="collapsed")
 
