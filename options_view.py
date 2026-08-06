@@ -22,8 +22,36 @@ from polygon_options import (
     stock_snapshots,
 )
 
+from fmp_client import FMPClient, FMPError
+
 logger = logging.getLogger("stocklist")
 POSITIONS_CSV = Path(__file__).resolve().parent / "positions.csv"
+
+
+@st.cache_resource
+def _fmp() -> FMPClient:
+    return FMPClient(delay=0)
+
+
+def _underlying_quotes(tickers: tuple[str, ...]) -> dict[str, dict]:
+    """Real-time spot + day change per underlying from FMP (the Polygon
+    options-only plan serves 15-min-delayed stock trades — do not use it for
+    spot). FMP symbology uses dashes for class shares: BRK.B -> BRK-B."""
+
+    def one(t: str) -> tuple[str, dict]:
+        try:
+            q = _fmp().quote(t.replace(".", "-"))
+            return t, {
+                "price": q.get("price"),
+                "chg": q.get("change"),
+                "chg_pct": q.get("changePercentage"),
+            }
+        except FMPError as err:
+            logger.warning("[%s] FMP quote failed: %r", t, err)
+            return t, {}
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(pool.map(one, tickers))
 
 QUOTE_COLS = ["bid", "ask", "ivm", "delta", "gamma", "vega", "theta"]
 LIVE_INTERVAL = "5s"
@@ -178,11 +206,14 @@ def render() -> None:
                 logger.error("Positions fetch failed: %r", err)
                 st.error(f"Couldn't fetch position quotes: {err}")
                 return
-            und: dict[str, dict] = {}
-            try:
-                und = stock_snapshots(sorted(live["ticker"].unique()))
-            except PolygonError as err:
-                logger.warning("underlying snapshot fetch failed: %r", err)
+            tickers_u = tuple(sorted(live["ticker"].unique()))
+            und = _underlying_quotes(tickers_u)
+            if not any(v.get("price") for v in und.values()):
+                # FMP down — fall back to Polygon's (delayed) stocks snapshot.
+                try:
+                    und = stock_snapshots(list(tickers_u))
+                except PolygonError as err:
+                    logger.warning("underlying snapshot fetch failed: %r", err)
 
             # Underlying spot + day change on every position row.
             live["spot"] = live["ticker"].map(
@@ -203,8 +234,8 @@ def render() -> None:
                 use_container_width=True, hide_index=True,
             )
 
-            dd = live.dropna(subset=["qty", "delta", "underlying_price"]).copy()
-            dd["delta_dollars"] = dd["qty"] * 100 * dd["delta"] * dd["underlying_price"]
+            dd = live.dropna(subset=["qty", "delta", "spot"]).copy()
+            dd["delta_dollars"] = dd["qty"] * 100 * dd["delta"] * dd["spot"]
             dd_by_ticker = dd.groupby("ticker")["delta_dollars"].sum()
 
             rows = []
