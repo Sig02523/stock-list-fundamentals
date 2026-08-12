@@ -267,6 +267,7 @@ def render() -> None:
                 )
                 .map(_color_signed, subset=["Chg $", "Chg %"]),
                 use_container_width=True, hide_index=True,
+                height=38 + 35 * len(roll_disp),
             )
 
         st.fragment(_positions_body, run_every=run_every)()
