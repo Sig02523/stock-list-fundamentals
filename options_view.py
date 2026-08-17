@@ -157,6 +157,8 @@ def render() -> None:
     live_on = c_live.toggle(f"Live quotes (every {LIVE_INTERVAL})", value=True)
     if c_btn.button("🔄 Refresh now", type="primary", use_container_width=True):
         _chain.clear()
+        st.session_state["positions_df"] = _load_positions()
+        st.session_state.pop("positions_editor", None)
         st.rerun()
     run_every = LIVE_INTERVAL if live_on else None
 
