@@ -113,7 +113,15 @@ def _fetch_positions(records: tuple) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _positions_mtime() -> float | None:
+    try:
+        return POSITIONS_CSV.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _load_positions() -> pd.DataFrame:
+    st.session_state["positions_mtime"] = _positions_mtime()
     if POSITIONS_CSV.exists():
         return pd.read_csv(POSITIONS_CSV)
     return pd.DataFrame(columns=["ticker", "expiry", "type", "strike", "qty"])
@@ -203,6 +211,13 @@ def render() -> None:
         )
 
         def _positions_body() -> None:
+            # Pick up positions.csv changes on the live tick (e.g. a git pull
+            # or redeploy) — only when the file actually changed, so session
+            # edits in the editor aren't clobbered every 5s.
+            if _positions_mtime() != st.session_state.get("positions_mtime"):
+                st.session_state["positions_df"] = _load_positions()
+                st.session_state.pop("positions_editor", None)
+                st.rerun(scope="app")
             try:
                 live = _fetch_positions(records)
             except Exception as err:
