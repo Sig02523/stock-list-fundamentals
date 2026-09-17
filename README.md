@@ -60,6 +60,15 @@ streamlit run app.py
    APP_PASSWORD = "your-shared-password"
    ```
    Leave it blank to run the app open.
+5. (Recommended) Add a `GITHUB_TOKEN` secret so the **Add ticker** button
+   commits the new ticker to `tickers.csv` and triggers a snapshot rebuild —
+   without it, adds are per-session only and other viewers never see them:
+   ```toml
+   GITHUB_TOKEN = "github_pat_..."
+   ```
+   Use a fine-grained PAT scoped to this repo with **Contents: Read and
+   write** and **Actions: Read and write** permissions. `GITHUB_REPO`
+   (default `Sig02523/stock-list-fundamentals`) can override the target repo.
 5. Deploy. You'll get a public URL like `https://<app-name>.streamlit.app`.
 
 **Cold-start note.** Streamlit Community Cloud sleeps free-tier apps after

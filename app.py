@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
@@ -20,7 +21,14 @@ import streamlit as st
 # Streamlit Cloud provides secrets via st.secrets; clients read them from the
 # environment (locally .env via python-dotenv). Bridge the two.
 try:
-    for _k in ("FMP_API_KEY", "POLYGON_API_KEY", "LOG_GIST_ID", "LOG_GIST_TOKEN"):
+    for _k in (
+        "FMP_API_KEY",
+        "POLYGON_API_KEY",
+        "LOG_GIST_ID",
+        "LOG_GIST_TOKEN",
+        "GITHUB_TOKEN",
+        "GITHUB_REPO",
+    ):
         if _k in st.secrets:
             os.environ.setdefault(_k, st.secrets[_k])
 except Exception:
@@ -163,6 +171,51 @@ if not _password_gate():
 
 
 # ---------------------------------------------------------------------------
+# Persisting ticker adds: session state is per-viewer and Streamlit Cloud's
+# filesystem is ephemeral, so the only way an add reaches other viewers (and
+# the daily snapshot Action) is a commit back to the repo.
+# ---------------------------------------------------------------------------
+
+_GH_REPO = os.environ.get("GITHUB_REPO", "Sig02523/stock-list-fundamentals")
+
+
+def _push_tickers_to_github(df: pd.DataFrame, added: str) -> bool:
+    tok = os.environ.get("GITHUB_TOKEN")
+    if not tok:
+        logger.error("GITHUB_TOKEN not set — %s stays session-only, not pushed", added)
+        return False
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/tickers.csv"
+    headers = {
+        "Authorization": f"Bearer {tok}",
+        "Accept": "application/vnd.github+json",
+    }
+    try:
+        cur = requests.get(url, headers=headers, timeout=10)
+        payload = {
+            "message": f"feat: add {added} via app",
+            "content": base64.b64encode(df.to_csv(index=False).encode()).decode(),
+        }
+        if cur.ok:
+            payload["sha"] = cur.json()["sha"]
+        requests.put(url, json=payload, headers=headers, timeout=10).raise_for_status()
+    except Exception as e:
+        logger.error("[%s] tickers.csv push failed: %r", added, e)
+        return False
+    # Best-effort: kick the snapshot workflow so the new ticker's fundamentals
+    # land in snapshot.parquet now instead of at the next hourly cron run.
+    try:
+        requests.post(
+            f"https://api.github.com/repos/{_GH_REPO}/actions/workflows/snapshot.yml/dispatches",
+            json={"ref": "main"},
+            headers=headers,
+            timeout=10,
+        ).raise_for_status()
+    except Exception as e:
+        logger.warning("[%s] snapshot workflow dispatch failed: %r", added, e)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Data loading: cached snapshot + live refresh
 # ---------------------------------------------------------------------------
 
@@ -222,6 +275,8 @@ with tab_fund:
         st.session_state["report"] = snapshot
     if "tickers_df" not in st.session_state:
         st.session_state["tickers_df"] = _load_default_tickers()
+    if msg := st.session_state.pop("_add_toast", None):
+        st.toast(msg)
 
     with st.form("quick_add", clear_on_submit=True, border=False):
         c1, c2, c3 = st.columns([2, 1, 5])
@@ -258,14 +313,27 @@ with tab_fund:
                 )
                 has_any = bool(data_only.notna().any().any())
             if has_any:
-                st.session_state["tickers_df"] = pd.concat(
+                new_tdf = pd.concat(
                     [tdf, pd.DataFrame([{"ticker": t, "benchmark": "SPX", "note": ""}])],
                     ignore_index=True,
                 )
+                st.session_state["tickers_df"] = new_tdf
                 rep = st.session_state.get("report")
                 st.session_state["report"] = (
                     pd.concat([rep, one], ignore_index=True) if rep is not None else one
                 )
+                # Persist: local write covers local runs; the GitHub push is
+                # what makes the add visible to other viewers of the hosted app.
+                try:
+                    new_tdf.to_csv(DEFAULT_TICKERS_CSV, index=False)
+                except Exception as e:
+                    logger.error("[%s] local tickers.csv write failed: %r", t, e)
+                if _push_tickers_to_github(new_tdf, t):
+                    st.session_state["_add_toast"] = f"{t} added and pushed to GitHub."
+                else:
+                    st.session_state["_add_toast"] = (
+                        f"{t} added for this session only — GitHub push failed (see Logs)."
+                    )
                 # Reset the editor widget so it picks up the appended row.
                 st.session_state.pop("ticker_editor", None)
                 st.rerun()
