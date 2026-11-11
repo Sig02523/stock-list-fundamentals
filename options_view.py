@@ -89,28 +89,45 @@ def _expiries_with_strike(ticker: str, strike: float, direction: str) -> list[st
         return []
 
 
-def _fetch_positions(records: tuple) -> pd.DataFrame:
-    """Live quotes for every position, fetched in parallel (no cache)."""
+def _fetch_positions(
+    records: tuple, last_good: dict[str, dict]
+) -> tuple[pd.DataFrame, dict[str, dict]]:
+    """Live quotes for every position, fetched in parallel (no cache).
+
+    A contract that fails or returns nothing falls back to its last good
+    snapshot and is flagged stale, so one flaky request blanks neither its own
+    row nor the rest of the table. Worker threads only fetch — the cache is
+    merged on the main thread, since `st.session_state` isn't thread-safe.
+    """
 
     def one(rec):
         ticker, expiry, cp, strike, qty = rec
         occ = build_occ(ticker, expiry, cp, strike)
-        snap = None
         try:
-            snap = contract_snapshot(ticker, occ)
+            return occ, rec, contract_snapshot(ticker, occ)
         except PolygonError as err:
-            logger.error("[%s] position fetch failed: %r", occ, err)
+            logger.warning("[%s] position fetch failed: %r", occ, err)
+            return occ, rec, None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(one, records))
+
+    rows: list[dict] = []
+    fresh = dict(last_good)
+    for occ, (ticker, expiry, cp, strike, qty), snap in results:
+        stale = snap is None
+        if stale:
+            snap = last_good.get(occ)
+        else:
+            fresh[occ] = snap
         row = {
             "ticker": ticker, "expiry": expiry, "type": cp,
-            "strike": strike, "qty": qty,
+            "strike": strike, "qty": qty, "stale": stale and snap is not None,
         }
         row.update({c: (snap or {}).get(c) for c in QUOTE_COLS})
         row["underlying_price"] = (snap or {}).get("underlying_price")
-        return row
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        rows = list(pool.map(one, records))
-    return pd.DataFrame(rows)
+        rows.append(row)
+    return pd.DataFrame(rows), fresh
 
 
 def _positions_mtime() -> float | None:
@@ -219,11 +236,14 @@ def render() -> None:
                 st.session_state.pop("positions_editor", None)
                 st.rerun(scope="app")
             try:
-                live = _fetch_positions(records)
+                live, fresh = _fetch_positions(
+                    records, st.session_state.get("quote_cache", {})
+                )
             except Exception as err:
                 logger.error("Positions fetch failed: %r", err)
                 st.error(f"Couldn't fetch position quotes: {err}")
                 return
+            st.session_state["quote_cache"] = fresh
             tickers_u = tuple(sorted(live["ticker"].unique()))
             und = _underlying_quotes(tickers_u)
             if not any(v.get("price") for v in und.values()):
@@ -244,7 +264,14 @@ def render() -> None:
                 ["ticker", "expiry", "type", "strike", "qty", "spot", "chg", "chg_pct"]
                 + QUOTE_COLS
             )
-            st.caption(f"Quotes as of **{_stamp()}**" + (" — live" if live_on else ""))
+            caption = f"Quotes as of **{_stamp()}**" + (" — live" if live_on else "")
+            n_stale = int(live["stale"].sum())
+            if n_stale:
+                caption += (
+                    f" — ⚠ {n_stale} of {len(live)} quotes didn't refresh this "
+                    "tick (last good value shown)"
+                )
+            st.caption(caption)
             disp = live[pos_cols].rename(columns=_POS_LABELS)
             st.dataframe(
                 disp.style.format(_POS_FMT, na_rep="—")
@@ -272,7 +299,16 @@ def render() -> None:
                 "ticker": "TOTAL", "spot": None, "chg": None, "chg_pct": None,
                 "delta_dollars": dd_by_ticker.sum(),
             })
-            st.caption("By underlying")
+            rollup_caption = "By underlying"
+            n_missing = len(live) - len(dd)
+            if n_missing:
+                # Delta $ silently omits rows with no usable delta — say so,
+                # otherwise the total reads as a complete book exposure.
+                rollup_caption += (
+                    f" — Delta $ excludes {n_missing} position(s) with no "
+                    "usable delta"
+                )
+            st.caption(rollup_caption)
             roll_disp = pd.DataFrame(rows).rename(
                 columns={**_POS_LABELS, "delta_dollars": "Delta $"}
             )

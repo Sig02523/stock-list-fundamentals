@@ -15,17 +15,39 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 load_dotenv()
 
 BASE = "https://api.polygon.io"
 PAGE_LIMIT = 250
 MAX_PAGES = 10
-TIMEOUT = 15
+# (connect, read). A 15s connect budget stalled the 5s live tick for three
+# ticks on every flaky connection — fail the connect fast, keep the read slack.
+TIMEOUT = (3.05, 12)
 
 
 class PolygonError(Exception):
     pass
+
+
+class PolygonRateLimit(PolygonError):
+    """429 — retryable."""
+
+
+# Transport failures (read/connect timeouts, SSL EOF, reset-by-peer) are the
+# common case on this endpoint; they must surface as PolygonError so callers
+# can isolate one bad contract instead of losing the whole fetch.
+_RETRYABLE = (
+    PolygonRateLimit,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
 
 
 def _api_key() -> str:
@@ -35,14 +57,35 @@ def _api_key() -> str:
     return key
 
 
+@retry(
+    retry=retry_if_exception_type(_RETRYABLE),
+    # Fast and shallow: this runs inside a 5s live tick, so the whole retry
+    # budget has to stay well under one refresh interval.
+    wait=wait_exponential_jitter(initial=0.25, max=2),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def _request(url: str, params: dict) -> requests.Response:
+    res = requests.get(url, params=params, timeout=TIMEOUT)
+    if res.status_code == 429:
+        raise PolygonRateLimit(f"429 rate limited: {url.split('?')[0]}")
+    return res
+
+
 def _get(path_or_url: str, **params: Any) -> dict:
     url = path_or_url if path_or_url.startswith("http") else f"{BASE}{path_or_url}"
     params = {k: v for k, v in params.items() if v is not None}
     params["apiKey"] = _api_key()
-    res = requests.get(url, params=params, timeout=TIMEOUT)
+    try:
+        res = _request(url, params)
+    except requests.RequestException as err:
+        raise PolygonError(f"request failed for {url.split('?')[0]}: {err!r}") from err
     if res.status_code != 200:
         raise PolygonError(f"HTTP {res.status_code} for {url.split('?')[0]}: {res.text[:200]}")
-    data = res.json()
+    try:
+        data = res.json()
+    except ValueError as err:
+        raise PolygonError(f"non-JSON response for {url.split('?')[0]}: {err!r}") from err
     if data.get("status") not in ("OK", "DELAYED", None):
         raise PolygonError(f"API status={data.get('status')} error={data.get('error')}")
     return data
@@ -130,12 +173,32 @@ def expiries_with_strike(ticker: str, strike: float, direction: str = "gte") -> 
     return sorted({c["expiration_date"] for c in data.get("results", []) if c.get("expiration_date")})
 
 
+# Polygon reports implied_volatility ~0 (and occasionally absurd highs) when
+# its solver can't price a contract off a stale or crossed quote — common on
+# illiquid strikes. A sub-1% equity-option IV is never real, and the greeks
+# come out of the same solve, so they are discarded together rather than
+# shown as a plausible-looking 0.1% / near-zero delta.
+IV_MIN = 0.01
+IV_MAX = 10.0
+
+
+def _usable_iv(value: Any) -> float | None:
+    try:
+        iv = float(value)
+    except (TypeError, ValueError):
+        return None
+    return iv if IV_MIN <= iv <= IV_MAX else None
+
+
 def _row_from_snapshot(r: dict) -> dict:
     """Flatten one snapshot result into a display row."""
     details = r.get("details", {}) or {}
     quote = r.get("last_quote", {}) or {}
     greeks = r.get("greeks", {}) or {}
     day = r.get("day", {}) or {}
+    iv = _usable_iv(r.get("implied_volatility"))
+    if iv is None:
+        greeks = {}
     return {
         "occ": details.get("ticker"),
         "expiry": details.get("expiration_date"),
@@ -143,7 +206,7 @@ def _row_from_snapshot(r: dict) -> dict:
         "strike": details.get("strike_price"),
         "bid": quote.get("bid"),
         "ask": quote.get("ask"),
-        "ivm": r.get("implied_volatility"),
+        "ivm": iv,
         "delta": greeks.get("delta"),
         "gamma": greeks.get("gamma"),
         "vega": greeks.get("vega"),
