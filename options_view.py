@@ -126,6 +126,7 @@ def _fetch_positions(
         }
         row.update({c: (snap or {}).get(c) for c in QUOTE_COLS})
         row["underlying_price"] = (snap or {}).get("underlying_price")
+        row["greeks_source"] = (snap or {}).get("greeks_source")
         rows.append(row)
     return pd.DataFrame(rows), fresh
 
@@ -270,6 +271,13 @@ def render() -> None:
                 caption += (
                     f" — ⚠ {n_stale} of {len(live)} quotes didn't refresh this "
                     "tick (last good value shown)"
+                )
+            computed = live.loc[live["greeks_source"] == "computed", "ticker"]
+            if not computed.empty:
+                # Don't let locally-solved greeks pass as vendor numbers.
+                caption += (
+                    f" — greeks for {', '.join(sorted(computed.unique()))} "
+                    "solved locally (Polygon IV unusable)"
                 )
             st.caption(caption)
             disp = live[pos_cols].rename(columns=_POS_LABELS)

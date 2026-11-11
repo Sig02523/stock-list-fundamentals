@@ -22,6 +22,8 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
+import blackscholes
+
 load_dotenv()
 
 BASE = "https://api.polygon.io"
@@ -191,29 +193,49 @@ def _usable_iv(value: Any) -> float | None:
 
 
 def _row_from_snapshot(r: dict) -> dict:
-    """Flatten one snapshot result into a display row."""
+    """Flatten one snapshot result into a display row.
+
+    When Polygon's own IV is unusable, the greeks are re-solved locally off
+    the mid so the row still carries a delta. `greeks_source` records which
+    path produced the numbers.
+    """
     details = r.get("details", {}) or {}
     quote = r.get("last_quote", {}) or {}
     greeks = r.get("greeks", {}) or {}
     day = r.get("day", {}) or {}
+    strike = details.get("strike_price")
+    expiry = details.get("expiration_date")
+    is_call = str(details.get("contract_type", "")).lower().startswith("c")
+    bid, ask = quote.get("bid"), quote.get("ask")
+    underlying = (r.get("underlying_asset") or {}).get("price")
+
     iv = _usable_iv(r.get("implied_volatility"))
+    source = "polygon" if iv is not None else None
     if iv is None:
+        # Polygon's solver gave up — recover IV and greeks from the quote.
         greeks = {}
+        solved = blackscholes.solve(bid, ask, underlying, strike, expiry, is_call)
+        if solved:
+            iv = solved["ivm"]
+            greeks = solved
+            source = "computed"
+
     return {
         "occ": details.get("ticker"),
-        "expiry": details.get("expiration_date"),
+        "expiry": expiry,
         "type": details.get("contract_type"),
-        "strike": details.get("strike_price"),
-        "bid": quote.get("bid"),
-        "ask": quote.get("ask"),
+        "strike": strike,
+        "bid": bid,
+        "ask": ask,
         "ivm": iv,
         "delta": greeks.get("delta"),
         "gamma": greeks.get("gamma"),
         "vega": greeks.get("vega"),
         "theta": greeks.get("theta"),
+        "greeks_source": source,
         "open_interest": r.get("open_interest"),
         "volume": day.get("volume"),
-        "underlying_price": (r.get("underlying_asset") or {}).get("price"),
+        "underlying_price": underlying,
     }
 
 
