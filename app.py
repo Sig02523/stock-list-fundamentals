@@ -119,7 +119,11 @@ class _SessionLogHandler(logging.Handler):
         else:
             self.buf.append(msg)
         del self.buf[:-_MAX_LOG_LINES]
-        if record.levelno >= logging.ERROR:
+        # Ship on WARNING, not just ERROR: the conditions worth reading
+        # remotely (a contract that yields no greeks, a swallowed 404, a
+        # retried timeout) are all warnings — an ERROR-only trigger left the
+        # gist silent for exactly the failures it exists to surface.
+        if record.levelno >= logging.WARNING:
             _ship_logs(self.buf)
 
 

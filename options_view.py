@@ -129,6 +129,10 @@ def _fetch_positions(
         row.update({c: (snap or {}).get(c) for c in QUOTE_COLS})
         row["underlying_price"] = (snap or {}).get("underlying_price")
         row["greeks_source"] = (snap or {}).get("greeks_source")
+        row["greeks_note"] = (
+            (snap or {}).get("greeks_note")
+            or (None if snap else "no snapshot returned (404 / empty / fetch failed)")
+        )
         rows.append(row)
     return pd.DataFrame(rows), fresh
 
@@ -294,6 +298,22 @@ def render() -> None:
                 .map(_color_signed, subset=["Chg $", "Chg %"]),
                 use_container_width=True, hide_index=True,
             )
+
+            # Why a row has no greeks, in the open. A bare "—" gave no way to
+            # tell a missing contract from a missing quote from a declined
+            # solve, which made this class of bug near-impossible to place.
+            blank = live[live["greeks_source"].isna()]
+            if not blank.empty:
+                with st.expander(
+                    f"⚠ {len(blank)} position(s) without greeks — why",
+                    expanded=False,
+                ):
+                    for row in blank.itertuples(index=False):
+                        st.markdown(
+                            f"**{row.ticker} {row.expiry} {row.strike:g} "
+                            f"{str(row.type).upper()}** — "
+                            f"`{row.greeks_note or 'no reason recorded'}`"
+                        )
 
             dd = live.dropna(subset=["qty", "delta", "spot"]).copy()
             dd["delta_dollars"] = dd["qty"] * 100 * dd["delta"] * dd["spot"]

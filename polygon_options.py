@@ -219,6 +219,7 @@ def _row_from_snapshot(r: dict, spot: float | None = None) -> dict:
 
     iv = _usable_iv(r.get("implied_volatility"))
     source = "polygon" if iv is not None else None
+    note = None
     if iv is None:
         # Polygon's solver gave up — recover IV and greeks from the quote.
         greeks = {}
@@ -229,18 +230,21 @@ def _row_from_snapshot(r: dict, spot: float | None = None) -> dict:
             source = "computed"
         else:
             # Name the missing input — otherwise a contract with no greeks is
-            # indistinguishable from one the solver merely declined.
+            # indistinguishable from one the solver merely declined. Carried
+            # on the row as well as logged, so the UI can show the reason
+            # instead of a bare dash.
             missing = [
                 name for name, value in (
                     ("bid", bid), ("ask", ask), ("spot", solve_spot),
                     ("strike", strike), ("expiry", expiry),
                 ) if value in (None, "")
             ]
-            logger.warning(
-                "[%s] no usable greeks: polygon_iv=%r missing=%s bid=%r ask=%r spot=%r",
-                details.get("ticker"), r.get("implied_volatility"),
-                missing or "nothing (solver declined)", bid, ask, solve_spot,
+            note = (
+                f"polygon_iv={r.get('implied_volatility')!r} "
+                f"missing={missing or 'nothing (solver declined)'} "
+                f"bid={bid!r} ask={ask!r} spot={solve_spot!r}"
             )
+            logger.warning("[%s] no usable greeks: %s", details.get("ticker"), note)
 
     return {
         "occ": details.get("ticker"),
@@ -255,6 +259,7 @@ def _row_from_snapshot(r: dict, spot: float | None = None) -> dict:
         "vega": greeks.get("vega"),
         "theta": greeks.get("theta"),
         "greeks_source": source,
+        "greeks_note": note,
         "open_interest": r.get("open_interest"),
         "volume": day.get("volume"),
         "underlying_price": underlying,
