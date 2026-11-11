@@ -9,6 +9,7 @@ delta/gamma/theta/vega in one response.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date
 from typing import Any
@@ -25,6 +26,8 @@ from tenacity import (
 import blackscholes
 
 load_dotenv()
+
+logger = logging.getLogger("stocklist")
 
 BASE = "https://api.polygon.io"
 PAGE_LIMIT = 250
@@ -192,12 +195,16 @@ def _usable_iv(value: Any) -> float | None:
     return iv if IV_MIN <= iv <= IV_MAX else None
 
 
-def _row_from_snapshot(r: dict) -> dict:
+def _row_from_snapshot(r: dict, spot: float | None = None) -> dict:
     """Flatten one snapshot result into a display row.
 
     When Polygon's own IV is unusable, the greeks are re-solved locally off
     the mid so the row still carries a delta. `greeks_source` records which
     path produced the numbers.
+
+    `spot` is the caller's own underlying price. It takes precedence over
+    `underlying_asset.price`, which this plan does not reliably populate —
+    the same reason the view sources spot from FMP.
     """
     details = r.get("details", {}) or {}
     quote = r.get("last_quote", {}) or {}
@@ -208,17 +215,32 @@ def _row_from_snapshot(r: dict) -> dict:
     is_call = str(details.get("contract_type", "")).lower().startswith("c")
     bid, ask = quote.get("bid"), quote.get("ask")
     underlying = (r.get("underlying_asset") or {}).get("price")
+    solve_spot = spot if spot is not None else underlying
 
     iv = _usable_iv(r.get("implied_volatility"))
     source = "polygon" if iv is not None else None
     if iv is None:
         # Polygon's solver gave up — recover IV and greeks from the quote.
         greeks = {}
-        solved = blackscholes.solve(bid, ask, underlying, strike, expiry, is_call)
+        solved = blackscholes.solve(bid, ask, solve_spot, strike, expiry, is_call)
         if solved:
             iv = solved["ivm"]
             greeks = solved
             source = "computed"
+        else:
+            # Name the missing input — otherwise a contract with no greeks is
+            # indistinguishable from one the solver merely declined.
+            missing = [
+                name for name, value in (
+                    ("bid", bid), ("ask", ask), ("spot", solve_spot),
+                    ("strike", strike), ("expiry", expiry),
+                ) if value in (None, "")
+            ]
+            logger.warning(
+                "[%s] no usable greeks: polygon_iv=%r missing=%s bid=%r ask=%r spot=%r",
+                details.get("ticker"), r.get("implied_volatility"),
+                missing or "nothing (solver declined)", bid, ask, solve_spot,
+            )
 
     return {
         "occ": details.get("ticker"),
@@ -265,13 +287,23 @@ def chain_snapshot(ticker: str, expiry_iso: str, contract_type: str) -> list[dic
     return rows
 
 
-def contract_snapshot(ticker: str, occ: str) -> dict | None:
-    """Quote + greeks for one contract; None if not found."""
+def contract_snapshot(
+    ticker: str, occ: str, spot: float | None = None
+) -> dict | None:
+    """Quote + greeks for one contract; None if not found.
+
+    Pass `spot` when the caller has a better underlying price than this plan's
+    `underlying_asset.price` — it is what the local greeks fallback solves on.
+    """
     try:
         data = _get(f"/v3/snapshot/options/{ticker.upper()}/{occ}")
     except PolygonError as e:
         if "HTTP 404" in str(e):
+            logger.warning("[%s] contract not found (404) for underlying %s", occ, ticker)
             return None
         raise
     result = data.get("results")
-    return _row_from_snapshot(result) if result else None
+    if not result:
+        logger.warning("[%s] snapshot returned no results", occ)
+        return None
+    return _row_from_snapshot(result, spot=spot)

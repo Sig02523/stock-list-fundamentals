@@ -90,7 +90,7 @@ def _expiries_with_strike(ticker: str, strike: float, direction: str) -> list[st
 
 
 def _fetch_positions(
-    records: tuple, last_good: dict[str, dict]
+    records: tuple, last_good: dict[str, dict], spots: dict[str, float] | None = None
 ) -> tuple[pd.DataFrame, dict[str, dict]]:
     """Live quotes for every position, fetched in parallel (no cache).
 
@@ -100,11 +100,13 @@ def _fetch_positions(
     merged on the main thread, since `st.session_state` isn't thread-safe.
     """
 
+    spots = spots or {}
+
     def one(rec):
         ticker, expiry, cp, strike, qty = rec
         occ = build_occ(ticker, expiry, cp, strike)
         try:
-            return occ, rec, contract_snapshot(ticker, occ)
+            return occ, rec, contract_snapshot(ticker, occ, spot=spots.get(ticker))
         except PolygonError as err:
             logger.warning("[%s] position fetch failed: %r", occ, err)
             return occ, rec, None
@@ -236,16 +238,9 @@ def render() -> None:
                 st.session_state["positions_df"] = _load_positions()
                 st.session_state.pop("positions_editor", None)
                 st.rerun(scope="app")
-            try:
-                live, fresh = _fetch_positions(
-                    records, st.session_state.get("quote_cache", {})
-                )
-            except Exception as err:
-                logger.error("Positions fetch failed: %r", err)
-                st.error(f"Couldn't fetch position quotes: {err}")
-                return
-            st.session_state["quote_cache"] = fresh
-            tickers_u = tuple(sorted(live["ticker"].unique()))
+            # Spot first: the local greeks fallback solves on it, and this
+            # plan's `underlying_asset.price` can't be relied on to supply it.
+            tickers_u = tuple(sorted({r[0] for r in records}))
             und = _underlying_quotes(tickers_u)
             if not any(v.get("price") for v in und.values()):
                 # FMP down — fall back to Polygon's (delayed) stocks snapshot.
@@ -253,6 +248,19 @@ def render() -> None:
                     und = stock_snapshots(list(tickers_u))
                 except PolygonError as err:
                     logger.warning("underlying snapshot fetch failed: %r", err)
+            spots = {
+                t: v.get("price") for t, v in und.items() if v.get("price") is not None
+            }
+
+            try:
+                live, fresh = _fetch_positions(
+                    records, st.session_state.get("quote_cache", {}), spots
+                )
+            except Exception as err:
+                logger.error("Positions fetch failed: %r", err)
+                st.error(f"Couldn't fetch position quotes: {err}")
+                return
+            st.session_state["quote_cache"] = fresh
 
             # Underlying spot + day change on every position row.
             live["spot"] = live["ticker"].map(
