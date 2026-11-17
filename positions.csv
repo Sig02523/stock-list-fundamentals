@@ -1,6 +1,7 @@
 ticker,expiry,type,strike,qty
 AMD,2026-11-20,call,535,-60
 AMD,2026-11-20,call,600,-12
+ASML,2026-11-20,call,1440,-15
 AVGO,2026-11-20,call,390,-60
 BRK.B,2026-11-20,call,530,-50
 CSCO,2026-11-20,call,96,-100
