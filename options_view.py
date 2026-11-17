@@ -151,6 +151,29 @@ def _load_positions() -> pd.DataFrame:
     return pd.DataFrame(columns=["ticker", "expiry", "type", "strike", "qty"])
 
 
+def _file_row_count() -> int | None:
+    """Rows in positions.csv right now, to compare against what's displayed."""
+    try:
+        return len(pd.read_csv(POSITIONS_CSV))
+    except (OSError, ValueError):
+        return None
+
+
+def _editor_key() -> str:
+    """Key the editor to the file version it was built from.
+
+    st.data_editor records edits as POSITIONAL deltas (deleted_rows: [5], ...)
+    and re-applies them to whatever frame it is handed. A key that outlives a
+    positions.csv change therefore deletes or overwrites whichever unrelated
+    row has since moved into that slot. Rotating the key retires the deltas
+    with the frame they were made against.
+    """
+    return (
+        f"positions_editor_{st.session_state.get('positions_mtime')}"
+        f"_{st.session_state.get('positions_editor_nonce', 0)}"
+    )
+
+
 def _stamp() -> str:
     return f"{datetime.now(ZoneInfo('America/New_York')):%H:%M:%S} ET"
 
@@ -189,8 +212,13 @@ def render() -> None:
     live_on = c_live.toggle(f"Live quotes (every {LIVE_INTERVAL})", value=True)
     if c_btn.button("🔄 Refresh now", type="primary", use_container_width=True):
         _chain.clear()
+        # Bump the nonce first: _load_positions refreshes the mtime, but an
+        # unchanged file would otherwise hand the editor back its old key and
+        # with it the stale deltas this button exists to clear.
+        st.session_state["positions_editor_nonce"] = (
+            st.session_state.get("positions_editor_nonce", 0) + 1
+        )
         st.session_state["positions_df"] = _load_positions()
-        st.session_state.pop("positions_editor", None)
         st.rerun()
     run_every = LIVE_INTERVAL if live_on else None
 
@@ -219,11 +247,23 @@ def render() -> None:
                 "strike": st.column_config.NumberColumn("Strike", required=True),
                 "qty": st.column_config.NumberColumn("Qty"),
             },
-            key="positions_editor",
+            key=_editor_key(),
         )
         st.session_state["positions_df"] = edited
 
     pos = st.session_state["positions_df"].dropna(subset=["ticker", "expiry", "strike"])
+
+    # A row present in the file but absent from the table means session edit
+    # state is masking it — say so plainly rather than letting it read as a
+    # position that was never entered.
+    n_file = _file_row_count()
+    if n_file is not None and n_file != len(pos):
+        st.warning(
+            f"Showing **{len(pos)}** of the **{n_file}** rows in "
+            "`positions.csv` — session edits are masking the difference. "
+            "Click **🔄 Refresh now** to discard them and reload the file."
+        )
+
     if pos.empty:
         st.info("No positions yet — add rows under **Edit positions**.")
     else:
@@ -239,8 +279,10 @@ def render() -> None:
             # or redeploy) — only when the file actually changed, so session
             # edits in the editor aren't clobbered every 5s.
             if _positions_mtime() != st.session_state.get("positions_mtime"):
+                # _load_positions updates the mtime, which rotates the editor
+                # key on its own — the old pop() named a key that no longer
+                # exists and cleared nothing.
                 st.session_state["positions_df"] = _load_positions()
-                st.session_state.pop("positions_editor", None)
                 st.rerun(scope="app")
             # Spot first: the local greeks fallback solves on it, and this
             # plan's `underlying_asset.price` can't be relied on to supply it.
