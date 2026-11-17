@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -159,6 +160,27 @@ def _file_row_count() -> int | None:
         return None
 
 
+def _file_fingerprint() -> str:
+    """What this process actually has on disk, stated outright.
+
+    A stale checkout and a correct one look identical from the table alone —
+    both simply lack the row — so the row count, modification time and a
+    content hash are shown unconditionally. They make "the deploy is behind"
+    distinguishable from "something is hiding the row" without guesswork.
+    """
+    try:
+        raw = POSITIONS_CSV.read_bytes()
+    except OSError:
+        return "positions.csv unreadable"
+    digest = hashlib.sha256(raw).hexdigest()[:8]
+    mtime = _positions_mtime()
+    stamp = (
+        f"{datetime.fromtimestamp(mtime, ZoneInfo('America/New_York')):%b %d %H:%M:%S}"
+        if mtime else "unknown"
+    )
+    return f"{_file_row_count()} rows · modified {stamp} ET · sha {digest}"
+
+
 def _editor_key() -> str:
     """Key the editor to the file version it was built from.
 
@@ -256,6 +278,7 @@ def render() -> None:
     # A row present in the file but absent from the table means session edit
     # state is masking it — say so plainly rather than letting it read as a
     # position that was never entered.
+    st.caption(f"Source: `positions.csv` — {_file_fingerprint()}")
     n_file = _file_row_count()
     if n_file is not None and n_file != len(pos):
         st.warning(
