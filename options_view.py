@@ -297,6 +297,10 @@ def render() -> None:
                 disp.style.format(_POS_FMT, na_rep="—")
                 .map(_color_signed, subset=["Chg $", "Chg %"]),
                 use_container_width=True, hide_index=True,
+                # Size to the book. Without this the table takes Streamlit's
+                # ~400px default and hides everything past ~10 rows behind an
+                # inner scrollbar — which reads as "the position is missing".
+                height=min(38 + 35 * len(disp), 900),
             )
 
             # Why a row has no greeks, in the open. A bare "—" gave no way to
