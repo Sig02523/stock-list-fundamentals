@@ -1,6 +1,7 @@
 ticker,expiry,type,strike,qty
 AVGO,2026-12-18,call,345,-50
 AVGO,2026-12-18,put,290,50
+MU,2026-12-18,call,730,-70
 MU,2026-12-18,call,760,-50
 MU,2026-12-18,call,830,-100
 MU,2026-12-18,put,620,50
